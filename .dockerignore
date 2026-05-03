@@ -1,0 +1,7 @@
+.git
+.gitignore
+.env
+.codex
+node_modules
+data/*.json
+npm-debug.log*

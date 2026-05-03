@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dogcoding 额度领取</title>
+    <meta
+      name="description"
+      content="输入注册邮箱，自助领取一次 10 刀额度。"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="void-glow glow-cyan"></div>
+    <div class="void-glow glow-magenta"></div>
+    <div class="rain"></div>
+    <div class="scanlines"></div>
+
+    <main class="shell">
+      <section class="card">
+        <p class="eyebrow">dogcoding</p>
+        <h1>邮箱领取额度</h1>
+        <p class="lede">输入已注册邮箱，系统会自动核验并发放一次性奖励。</p>
+
+        <div class="summary">
+          <div class="summary-item">
+            <span class="summary-label">奖励</span>
+            <strong><span data-claim-amount>10</span> 刀</strong>
+          </div>
+          <div class="summary-item">
+            <span class="summary-label">限制</span>
+            <strong>每个账户一次</strong>
+          </div>
+          <div class="summary-item">
+            <span class="summary-label">条件</span>
+            <strong>仅限已注册邮箱</strong>
+          </div>
+        </div>
+
+        <form id="claim-form" class="claim-form">
+          <label class="field">
+            <span class="field-label">账户邮箱</span>
+            <div class="input-shell">
+              <span class="input-shell__scan" aria-hidden="true"></span>
+              <input
+                id="email"
+                name="email"
+                type="email"
+                autocomplete="email"
+                placeholder="name@example.com"
+                required
+              />
+            </div>
+          </label>
+
+          <div class="captcha-row">
+            <label class="field field-captcha">
+              <span class="field-label">验证码</span>
+              <div class="input-shell">
+                <span class="input-shell__scan" aria-hidden="true"></span>
+                <input
+                  id="captcha"
+                  name="captcha"
+                  type="text"
+                  inputmode="text"
+                  autocomplete="off"
+                  maxlength="6"
+                  placeholder="输入验证码"
+                  required
+                />
+              </div>
+            </label>
+
+            <div class="captcha-box">
+              <img id="captcha-image" class="captcha-image" alt="验证码" />
+              <button id="captcha-refresh" class="captcha-refresh" type="button">
+                换一张
+              </button>
+            </div>
+          </div>
+
+          <button id="submit-button" class="submit-button" type="submit">
+            <span class="submit-button__label" data-submit-label>领取额度</span>
+            <span class="submit-button__value"><span data-submit-amount>10</span> 刀</span>
+          </button>
+        </form>
+
+        <section
+          id="status-card"
+          class="status-card status-idle"
+          aria-live="polite"
+        >
+          <p class="status-eyebrow">领取状态</p>
+          <p id="status-title" class="status-title">等待提交</p>
+          <p id="status-message" class="status-message">填写邮箱后即可发起领取。</p>
+        </section>
+
+        <div class="notes">
+          <p>邮箱不存在会提示“无该账户”。</p>
+          <p>领取成功后即时入账，重复领取会被拦截。</p>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

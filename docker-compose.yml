@@ -1,0 +1,13 @@
+services:
+  laodog-bonus-claim:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: laodog-bonus-claim
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
