@@ -959,7 +959,7 @@ function app_move_gallery_image(string $id, string $direction): void
     });
 }
 
-function app_serve_media(string $id): never
+function app_serve_media(string $id, string $method = 'GET'): never
 {
     $safeId = basename($id);
     $file = APP_GALLERY_DIR . '/' . $safeId;
@@ -980,7 +980,9 @@ function app_serve_media(string $id): never
     header('Content-Type: ' . $contentType);
     header('Cache-Control: no-store');
     header('Content-Length: ' . (string) filesize($file));
-    readfile($file);
+    if (strtoupper($method) !== 'HEAD') {
+        readfile($file);
+    }
     exit;
 }
 
@@ -1079,8 +1081,8 @@ function app_dispatch(string $method, string $path): never
             app_json_response(200, ['ok' => true]);
         }
 
-        if ($method === 'GET' && preg_match('#^/media/([^/]+)$#', $path, $matches)) {
-            app_serve_media(rawurldecode($matches[1]));
+        if (($method === 'GET' || $method === 'HEAD') && preg_match('#^/media/([^/]+)$#', $path, $matches)) {
+            app_serve_media(rawurldecode($matches[1]), $method);
         }
 
         app_not_found();
