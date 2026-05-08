@@ -9,15 +9,22 @@ const statusTitle = document.querySelector("#status-title");
 const statusMessage = document.querySelector("#status-message");
 const amountNodes = document.querySelectorAll("[data-claim-amount]");
 const submitButtonLabel = document.querySelector("[data-submit-label]");
+const galleryStrip = document.querySelector("#gallery-strip");
 let captchaToken = "";
 
 function setStatus(tone, title, message) {
+  if (!statusCard || !statusTitle || !statusMessage) {
+    return;
+  }
   statusCard.className = `status-card status-${tone}`;
   statusTitle.textContent = title;
   statusMessage.textContent = message;
 }
 
 function setBusy(busy) {
+  if (!submitButton) {
+    return;
+  }
   submitButton.disabled = busy;
   submitButton.classList.toggle("is-processing", busy);
   if (captchaRefreshButton) {
@@ -63,83 +70,116 @@ async function loadConfig() {
   }
 }
 
+async function loadGallery() {
+  if (!galleryStrip) {
+    return;
+  }
+
+  try {
+    const response = await fetch("/api/gallery", { cache: "no-store" });
+    const payload = await response.json().catch(() => ({ items: [] }));
+    const items = Array.isArray(payload.items) ? payload.items : [];
+
+    if (!items.length) {
+      galleryStrip.innerHTML = '<div class="gallery-empty">暂无二维码，请到管理端上传。</div>';
+      return;
+    }
+
+    galleryStrip.innerHTML = items.map((item) => `
+      <figure class="gallery-item">
+        <img src="${item.url}" alt="${item.alt || item.title || "二维码"}" />
+        <figcaption><a href="${item.url}" target="_blank" rel="noreferrer">${item.title || "二维码"}</a></figcaption>
+      </figure>
+    `).join("");
+  } catch {
+    galleryStrip.innerHTML = '<div class="gallery-empty">二维码加载失败。</div>';
+  }
+}
+
 captchaRefreshButton?.addEventListener("click", async () => {
   try {
-    captchaInput.value = "";
+    if (captchaInput) {
+      captchaInput.value = "";
+    }
     await loadCaptcha();
-    captchaInput.focus();
+    captchaInput?.focus();
   } catch {
     setStatus("error", "验证码加载失败", "请稍后重试或刷新页面。");
   }
 });
 
-form.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const email = emailInput.value.trim();
-  const captchaCode = captchaInput.value.trim();
+if (form && emailInput && captchaInput) {
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const email = emailInput.value.trim();
+    const captchaCode = captchaInput.value.trim();
 
-  if (!email) {
-    setStatus("error", "邮箱不能为空", "请输入要领取额度的注册邮箱。");
-    return;
-  }
-
-  if (!captchaCode || !captchaToken) {
-    setStatus("error", "验证码不能为空", "请输入验证码后再领取。");
-    return;
-  }
-
-  setBusy(true);
-  setStatus("pending", "正在核验", "正在检查用户是否存在，并尝试发放额度。");
-
-  try {
-    const response = await fetch("/api/claim", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        email,
-        captchaToken,
-        captchaCode
-      })
-    });
-
-    const payload = await response.json().catch(() => ({
-      message: "服务返回异常。"
-    }));
-
-    captchaInput.value = "";
-    await loadCaptcha();
-
-    if (!response.ok) {
-      const tone = payload.error === "already_claimed" || payload.error === "claim_pending"
-        ? "warning"
-        : "error";
-      setStatus(tone, "领取失败", payload.message || "处理失败，请稍后再试。");
+    if (!email) {
+      setStatus("error", "邮箱不能为空", "请输入要领取额度的注册邮箱。");
       return;
     }
 
-    setStatus(
-      "success",
-      "领取成功",
-      payload.message || `已为 ${email} 发放额度。`
-    );
-    form.reset();
-    emailInput.focus();
-  } catch {
-    captchaInput.value = "";
-    try {
-      await loadCaptcha();
-    } catch {
-      // Ignore secondary captcha refresh errors here.
+    if (!captchaCode || !captchaToken) {
+      setStatus("error", "验证码不能为空", "请输入验证码后再领取。");
+      return;
     }
-    setStatus("error", "请求失败", "网络异常或服务不可用，请稍后再试。");
-  } finally {
-    setBusy(false);
-  }
-});
+
+    setBusy(true);
+    setStatus("pending", "正在核验", "正在检查用户是否存在，并尝试发放额度。");
+
+    try {
+      const response = await fetch("/api/claim", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          email,
+          captchaToken,
+          captchaCode
+        })
+      });
+
+      const payload = await response.json().catch(() => ({
+        message: "服务返回异常。"
+      }));
+
+      captchaInput.value = "";
+      await loadCaptcha();
+
+      if (!response.ok) {
+        const tone = payload.error === "already_claimed" || payload.error === "claim_pending"
+          ? "warning"
+          : "error";
+        setStatus(tone, "领取失败", payload.message || "处理失败，请稍后再试。");
+        return;
+      }
+
+      setStatus(
+        "success",
+        "领取成功",
+        payload.message || `已为 ${email} 发放额度。`
+      );
+      form.reset();
+      emailInput.focus();
+    } catch {
+      captchaInput.value = "";
+      try {
+        await loadCaptcha();
+      } catch {
+        // Ignore secondary captcha refresh errors here.
+      }
+      setStatus("error", "请求失败", "网络异常或服务不可用，请稍后再试。");
+    } finally {
+      setBusy(false);
+    }
+  });
+}
 
 loadConfig();
-loadCaptcha().catch(() => {
-  setStatus("error", "验证码加载失败", "请刷新页面后重试。");
-});
+if (captchaImage) {
+  loadCaptcha().catch(() => {
+    setStatus("error", "验证码加载失败", "请刷新页面后重试。");
+  });
+}
+loadGallery();

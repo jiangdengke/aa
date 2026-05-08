@@ -1,3 +1,6 @@
 .env
 data/*.json
 !data/.gitkeep
+data/gallery/
+data/locks/
+"Screenshot from 2026-05-08 10-08-11.png"

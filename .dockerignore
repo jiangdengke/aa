@@ -2,6 +2,7 @@
 .gitignore
 .env
 .codex
-node_modules
 data/*.json
+data/gallery/
+data/locks/
 npm-debug.log*

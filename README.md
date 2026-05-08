@@ -1,18 +1,25 @@
 # dogcoding 自助领 10 刀
 
-这是一个最小可用的自助领取页：
+这是一个 PHP 单体应用：
 
-- 用户在网页输入邮箱
-- 服务端用管理员账号登录 `https://ai.laodog.top`
-- 去用户管理搜索邮箱
-- 找到用户后调用管理员余额接口加 `10`
-- 每个账户只允许领取一次
+- 用户在首页输入邮箱领取额度
+- 服务端登录 `https://ai.laodog.top` 管理后台
+- 查询用户是否存在
+- 给符合条件的用户加 `10`
+- 每个账户只能领取一次
+- 带服务端验证码
+- 带管理后台、领取记录、二维码图库管理
 
 ## 文件结构
 
-- `server.mjs`: 无依赖 Node 服务端
-- `public/`: 静态页面
-- `data/claims.json`: 领取记录，首次运行后自动生成
+- `app.php`: PHP 核心逻辑
+- `router.php`: PHP 内置服务器路由入口
+- `index.php`: 首页
+- `admin.php`: 管理后台页
+- `public/`: 前端静态资源
+- `data/claims.json`: 领取记录
+- `data/gallery.json`: 二维码图库元数据
+- `data/gallery/`: 二维码图片目录
 
 ## 配置
 
@@ -28,17 +35,15 @@
 - `CAPTCHA_TTL_SECONDS`: 验证码有效期，默认 `300`
 - `CAPTCHA_MAX_ATTEMPTS`: 单个验证码最多尝试次数，默认 `5`
 - `CAPTCHA_RATE_LIMIT_MAX`: 单个 IP 10 分钟内最多刷新验证码次数，默认 `40`
+- `GALLERY_UPLOAD_MAX_FILES`: 首页最多保留的图片数量，默认 `8`
+- `GALLERY_UPLOAD_MAX_BYTES`: 单张上传图片最大体积，默认 `3145728`
 
-Node 20+ 可以直接用：
+## 本地启动
 
-```bash
-node --env-file=.env server.mjs
-```
-
-或者：
+需要 PHP 8.2+，直接用 PHP 内置服务器：
 
 ```bash
-npm run start:env
+php -S 0.0.0.0:3000 router.php
 ```
 
 启动后访问：
@@ -50,7 +55,13 @@ http://127.0.0.1:3000
 领取记录页：
 
 ```text
-http://127.0.0.1:3000/admin.html
+http://127.0.0.1:3000/admin.php
+```
+
+管理后台页：
+
+```text
+http://127.0.0.1:3000/admin.php
 ```
 
 ## Docker Compose 启动
@@ -99,6 +110,18 @@ Compose 配置文件在 [docker-compose.yml](/home/jdk/code/aa/docker-compose.ym
 - `operation: "add"`
 - `balance: 10`
 
+应用自身还提供：
+
+- `GET /api/config`
+- `GET /api/captcha`
+- `POST /api/claim`
+- `GET /api/admin/claims`
+- `GET /api/gallery`
+- `POST /api/gallery/upload`
+- `DELETE /api/gallery/:id`
+- `POST /api/gallery/:id/move`
+- `GET /media/:id`
+
 ## 已做保护
 
 - 管理员邮箱和密码只保存在服务端环境变量里，不会发到前端
@@ -109,6 +132,8 @@ Compose 配置文件在 [docker-compose.yml](/home/jdk/code/aa/docker-compose.ym
 - 已接入服务端验证码，领取时必须输入正确验证码
 - 验证码带有效期、尝试次数限制和刷新频率限制
 - 已接入领取记录查询接口，必须提供 `RECORDS_ACCESS_KEY` 才能读取
+- 已接入二维码图片上传接口，使用同一个 `RECORDS_ACCESS_KEY` 管理
+- 管理后台已支持查看记录、上传二维码、删除二维码、调整图片顺序
 
 ## 需要你知道的风险
 
