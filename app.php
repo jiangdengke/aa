@@ -82,6 +82,13 @@ function app_config(): array
         'admin_email' => trim((string) app_env('ADMIN_EMAIL', '')),
         'admin_password' => (string) app_env('ADMIN_PASSWORD', ''),
         'records_access_key' => trim((string) app_env('RECORDS_ACCESS_KEY', '')),
+        'db_driver' => strtolower(trim((string) app_env('DB_DRIVER', 'file'))),
+        'db_host' => trim((string) app_env('DB_HOST', '')),
+        'db_port' => trim((string) app_env('DB_PORT', '3306')),
+        'db_database' => trim((string) app_env('DB_DATABASE', '')),
+        'db_username' => trim((string) app_env('DB_USERNAME', '')),
+        'db_password' => (string) app_env('DB_PASSWORD', ''),
+        'db_charset' => trim((string) app_env('DB_CHARSET', 'utf8mb4')),
         'claim_amount' => (float) (app_env('CLAIM_AMOUNT', '10') ?? '10'),
         'claim_notes' => trim((string) app_env('CLAIM_NOTES', 'Self-service bonus claim')),
         'rate_limit_max' => (int) (app_env('RATE_LIMIT_MAX', '20') ?? '20'),
@@ -95,6 +102,235 @@ function app_config(): array
     ];
 
     return $config;
+}
+
+function app_uses_database(): bool
+{
+    $config = app_config();
+    return $config['db_driver'] === 'mysql' || $config['db_host'] !== '' || $config['db_database'] !== '';
+}
+
+function app_database(): PDO
+{
+    static $pdo = null;
+    static $initialized = false;
+
+    if ($pdo !== null) {
+        return $pdo;
+    }
+
+    $config = app_config();
+    if (!app_uses_database()) {
+        throw new AppError(500, 'config_error', '数据库未配置。');
+    }
+    if ($config['db_database'] === '' || $config['db_username'] === '') {
+        throw new AppError(500, 'config_error', 'DB_DATABASE 或 DB_USERNAME 未配置。');
+    }
+
+    $host = $config['db_host'] !== '' ? $config['db_host'] : '127.0.0.1';
+    $charset = $config['db_charset'] !== '' ? $config['db_charset'] : 'utf8mb4';
+    $dsn = sprintf(
+        'mysql:host=%s;port=%s;dbname=%s;charset=%s',
+        $host,
+        $config['db_port'] !== '' ? $config['db_port'] : '3306',
+        $config['db_database'],
+        $charset
+    );
+
+    try {
+        $pdo = new PDO($dsn, $config['db_username'], $config['db_password'], [
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+            PDO::ATTR_EMULATE_PREPARES => false,
+        ]);
+    } catch (PDOException $error) {
+        throw new AppError(500, 'database_error', '数据库连接失败：' . $error->getMessage());
+    }
+
+    if (!$initialized) {
+        app_initialize_database($pdo);
+        $initialized = true;
+    }
+
+    return $pdo;
+}
+
+function app_initialize_database(PDO $pdo): void
+{
+    $pdo->exec(
+        "CREATE TABLE IF NOT EXISTS claims (
+            id VARCHAR(64) PRIMARY KEY,
+            type VARCHAR(32) NOT NULL DEFAULT 'auto_claim',
+            user_id VARCHAR(128) NOT NULL DEFAULT '',
+            email VARCHAR(255) NOT NULL DEFAULT '',
+            normalized_email VARCHAR(255) NOT NULL DEFAULT '',
+            amount DECIMAL(18, 4) NOT NULL DEFAULT 0,
+            status VARCHAR(32) NOT NULL DEFAULT 'pending',
+            auto_email_key VARCHAR(255) NULL,
+            auto_user_key VARCHAR(128) NULL,
+            remote_ip VARCHAR(64) NOT NULL DEFAULT '',
+            notes TEXT NULL,
+            created_at VARCHAR(40) NOT NULL,
+            awarded_at VARCHAR(40) NULL,
+            failed_at VARCHAR(40) NULL,
+            error_message TEXT NULL,
+            INDEX idx_claims_email (normalized_email),
+            INDEX idx_claims_user (user_id),
+            INDEX idx_claims_type_status (type, status),
+            INDEX idx_claims_created_at (created_at),
+            INDEX idx_claims_awarded_at (awarded_at),
+            UNIQUE KEY uniq_claims_auto_email (auto_email_key),
+            UNIQUE KEY uniq_claims_auto_user (auto_user_key)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+    );
+    app_ensure_database_column($pdo, 'claims', 'auto_email_key', 'VARCHAR(255) NULL');
+    app_ensure_database_column($pdo, 'claims', 'auto_user_key', 'VARCHAR(128) NULL');
+    app_ensure_database_index($pdo, 'claims', 'uniq_claims_auto_email', 'UNIQUE KEY uniq_claims_auto_email (auto_email_key)');
+    app_ensure_database_index($pdo, 'claims', 'uniq_claims_auto_user', 'UNIQUE KEY uniq_claims_auto_user (auto_user_key)');
+
+    $pdo->exec(
+        "CREATE TABLE IF NOT EXISTS gallery_images (
+            id VARCHAR(128) PRIMARY KEY,
+            title VARCHAR(255) NOT NULL DEFAULT '',
+            alt VARCHAR(255) NOT NULL DEFAULT '',
+            content_type VARCHAR(128) NOT NULL DEFAULT 'application/octet-stream',
+            original_name VARCHAR(255) NOT NULL DEFAULT '',
+            sort_order INT NOT NULL DEFAULT 0,
+            created_at VARCHAR(40) NOT NULL,
+            INDEX idx_gallery_sort (sort_order)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+    );
+
+    $pdo->exec(
+        "CREATE TABLE IF NOT EXISTS rate_limit_hits (
+            scope_name VARCHAR(64) NOT NULL,
+            ip VARCHAR(128) NOT NULL,
+            hit_at INT NOT NULL,
+            INDEX idx_rate_limit_lookup (scope_name, ip, hit_at),
+            INDEX idx_rate_limit_hit_at (hit_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+    );
+
+    app_import_json_to_database($pdo);
+}
+
+function app_ensure_database_column(PDO $pdo, string $table, string $column, string $definition): void
+{
+    $stmt = $pdo->prepare(
+        'SELECT COUNT(*)
+         FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table AND COLUMN_NAME = :column'
+    );
+    $stmt->execute([
+        'table' => $table,
+        'column' => $column,
+    ]);
+    if ((int) $stmt->fetchColumn() === 0) {
+        $pdo->exec(sprintf('ALTER TABLE `%s` ADD COLUMN `%s` %s', $table, $column, $definition));
+    }
+}
+
+function app_ensure_database_index(PDO $pdo, string $table, string $indexName, string $definition): void
+{
+    $stmt = $pdo->prepare(
+        'SELECT COUNT(*)
+         FROM INFORMATION_SCHEMA.STATISTICS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table AND INDEX_NAME = :index_name'
+    );
+    $stmt->execute([
+        'table' => $table,
+        'index_name' => $indexName,
+    ]);
+    if ((int) $stmt->fetchColumn() === 0) {
+        try {
+            $pdo->exec(sprintf('ALTER TABLE `%s` ADD %s', $table, $definition));
+        } catch (PDOException $error) {
+            error_log('Unable to create database index ' . $indexName . ': ' . $error->getMessage());
+        }
+    }
+}
+
+function app_import_json_to_database(PDO $pdo): void
+{
+    $claimCount = (int) $pdo->query('SELECT COUNT(*) FROM claims')->fetchColumn();
+    if ($claimCount === 0 && is_file(APP_CLAIMS_FILE)) {
+        $store = app_load_json_file(APP_CLAIMS_FILE, ['claims' => []]);
+        $claims = is_array($store['claims'] ?? null) ? $store['claims'] : [];
+        $stmt = $pdo->prepare(
+            'INSERT IGNORE INTO claims (
+                id, type, user_id, email, normalized_email, amount, status, auto_email_key, auto_user_key,
+                remote_ip, notes, created_at, awarded_at, failed_at, error_message
+            ) VALUES (
+                :id, :type, :user_id, :email, :normalized_email, :amount, :status, :auto_email_key, :auto_user_key,
+                :remote_ip, :notes, :created_at, :awarded_at, :failed_at, :error_message
+            )'
+        );
+        $seenAutoEmails = [];
+        $seenAutoUsers = [];
+        foreach ($claims as $claim) {
+            if (!is_array($claim)) {
+                continue;
+            }
+            $type = (string) ($claim['type'] ?? 'auto_claim');
+            $status = (string) ($claim['status'] ?? 'pending');
+            $normalizedEmail = (string) ($claim['normalizedEmail'] ?? app_normalize_email((string) ($claim['email'] ?? '')));
+            $userId = (string) ($claim['userId'] ?? '');
+            $activeAuto = $type === 'auto_claim' && $status !== 'failed';
+            $autoEmailKey = null;
+            $autoUserKey = null;
+            if ($activeAuto) {
+                if ($normalizedEmail !== '' && !isset($seenAutoEmails[$normalizedEmail])) {
+                    $autoEmailKey = $normalizedEmail;
+                    $seenAutoEmails[$normalizedEmail] = true;
+                }
+                if ($userId !== '' && !isset($seenAutoUsers[$userId])) {
+                    $autoUserKey = $userId;
+                    $seenAutoUsers[$userId] = true;
+                }
+            }
+            $stmt->execute([
+                'id' => (string) ($claim['id'] ?? bin2hex(random_bytes(16))),
+                'type' => $type,
+                'user_id' => $userId,
+                'email' => (string) ($claim['email'] ?? ''),
+                'normalized_email' => $normalizedEmail,
+                'amount' => (float) ($claim['amount'] ?? 0),
+                'status' => $status,
+                'auto_email_key' => $autoEmailKey,
+                'auto_user_key' => $autoUserKey,
+                'remote_ip' => (string) ($claim['remoteIp'] ?? ''),
+                'notes' => (string) ($claim['notes'] ?? ''),
+                'created_at' => (string) ($claim['createdAt'] ?? gmdate('c')),
+                'awarded_at' => $claim['awardedAt'] ?? null,
+                'failed_at' => $claim['failedAt'] ?? null,
+                'error_message' => $claim['errorMessage'] ?? null,
+            ]);
+        }
+    }
+
+    $galleryCount = (int) $pdo->query('SELECT COUNT(*) FROM gallery_images')->fetchColumn();
+    if ($galleryCount === 0 && is_file(APP_GALLERY_FILE)) {
+        $store = app_load_json_file(APP_GALLERY_FILE, ['images' => []]);
+        $images = is_array($store['images'] ?? null) ? $store['images'] : [];
+        $stmt = $pdo->prepare(
+            'INSERT IGNORE INTO gallery_images (id, title, alt, content_type, original_name, sort_order, created_at)
+             VALUES (:id, :title, :alt, :content_type, :original_name, :sort_order, :created_at)'
+        );
+        foreach ($images as $index => $image) {
+            if (!is_array($image) || trim((string) ($image['id'] ?? '')) === '') {
+                continue;
+            }
+            $stmt->execute([
+                'id' => (string) $image['id'],
+                'title' => (string) ($image['title'] ?? ''),
+                'alt' => (string) ($image['alt'] ?? ''),
+                'content_type' => (string) ($image['contentType'] ?? 'application/octet-stream'),
+                'original_name' => (string) ($image['originalName'] ?? ''),
+                'sort_order' => $index,
+                'created_at' => (string) ($image['createdAt'] ?? gmdate('c')),
+            ]);
+        }
+    }
 }
 
 function app_start_session(): void
@@ -284,6 +520,44 @@ function app_check_rate_limit(string $scope, string $ip, int $max): void
 {
     $window = app_config()['rate_limit_window_seconds'];
     $now = time();
+
+    if (app_uses_database()) {
+        $pdo = app_database();
+        $pdo->beginTransaction();
+        try {
+            $stmt = $pdo->prepare('DELETE FROM rate_limit_hits WHERE hit_at <= :cutoff');
+            $stmt->execute(['cutoff' => $now - $window]);
+
+            $stmt = $pdo->prepare(
+                'SELECT COUNT(*) FROM rate_limit_hits WHERE scope_name = :scope AND ip = :ip AND hit_at > :cutoff'
+            );
+            $stmt->execute([
+                'scope' => $scope,
+                'ip' => $ip,
+                'cutoff' => $now - $window,
+            ]);
+            if ((int) $stmt->fetchColumn() >= $max) {
+                $pdo->commit();
+                throw new AppError(429, 'rate_limited', '请求过于频繁，请稍后再试。');
+            }
+
+            $stmt = $pdo->prepare(
+                'INSERT INTO rate_limit_hits (scope_name, ip, hit_at) VALUES (:scope, :ip, :hit_at)'
+            );
+            $stmt->execute([
+                'scope' => $scope,
+                'ip' => $ip,
+                'hit_at' => $now,
+            ]);
+            $pdo->commit();
+            return;
+        } catch (Throwable $error) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            throw $error;
+        }
+    }
 
     app_with_lock('rate_limits', function () use ($scope, $ip, $max, $window, $now): void {
         $store = app_read_rate_limits();
@@ -652,6 +926,107 @@ function app_save_claims_store(array $store): void
     app_save_json_file(APP_CLAIMS_FILE, $store);
 }
 
+function app_db_claim_from_row(array $row): array
+{
+    return [
+        'id' => $row['id'] ?? '',
+        'type' => $row['type'] ?? 'auto_claim',
+        'userId' => $row['user_id'] ?? '',
+        'email' => $row['email'] ?? '',
+        'normalizedEmail' => $row['normalized_email'] ?? '',
+        'amount' => isset($row['amount']) ? (float) $row['amount'] : 0,
+        'status' => $row['status'] ?? '',
+        'remoteIp' => $row['remote_ip'] ?? '',
+        'notes' => $row['notes'] ?? '',
+        'createdAt' => $row['created_at'] ?? null,
+        'awardedAt' => $row['awarded_at'] ?? null,
+        'failedAt' => $row['failed_at'] ?? null,
+        'errorMessage' => $row['error_message'] ?? null,
+    ];
+}
+
+function app_db_insert_claim(PDO $pdo, array $record): void
+{
+    $stmt = $pdo->prepare(
+        'INSERT INTO claims (
+            id, type, user_id, email, normalized_email, amount, status, auto_email_key, auto_user_key, remote_ip, notes,
+            created_at, awarded_at, failed_at, error_message
+        ) VALUES (
+            :id, :type, :user_id, :email, :normalized_email, :amount, :status, :auto_email_key, :auto_user_key, :remote_ip, :notes,
+            :created_at, :awarded_at, :failed_at, :error_message
+        )'
+    );
+    $type = (string) ($record['type'] ?? 'auto_claim');
+    $status = (string) ($record['status'] ?? 'pending');
+    $activeAuto = $type === 'auto_claim' && $status !== 'failed';
+    $stmt->execute([
+        'id' => $record['id'],
+        'type' => $type,
+        'user_id' => (string) ($record['userId'] ?? ''),
+        'email' => (string) ($record['email'] ?? ''),
+        'normalized_email' => (string) ($record['normalizedEmail'] ?? ''),
+        'amount' => (float) ($record['amount'] ?? 0),
+        'status' => $status,
+        'auto_email_key' => $activeAuto ? (string) ($record['normalizedEmail'] ?? '') : null,
+        'auto_user_key' => $activeAuto ? (string) ($record['userId'] ?? '') : null,
+        'remote_ip' => (string) ($record['remoteIp'] ?? ''),
+        'notes' => (string) ($record['notes'] ?? ''),
+        'created_at' => (string) ($record['createdAt'] ?? gmdate('c')),
+        'awarded_at' => $record['awardedAt'] ?? null,
+        'failed_at' => $record['failedAt'] ?? null,
+        'error_message' => $record['errorMessage'] ?? null,
+    ]);
+}
+
+function app_db_update_claim_status(PDO $pdo, string $id, string $status, ?string $awardedAt, ?string $failedAt, ?string $errorMessage): array
+{
+    $stmt = $pdo->prepare(
+        'UPDATE claims
+         SET status = :status,
+             auto_email_key = CASE WHEN type = "auto_claim" AND :status_email <> "failed" THEN normalized_email ELSE NULL END,
+             auto_user_key = CASE WHEN type = "auto_claim" AND :status_user <> "failed" THEN user_id ELSE NULL END,
+             awarded_at = :awarded_at,
+             failed_at = :failed_at,
+             error_message = :error_message
+         WHERE id = :id'
+    );
+    $stmt->execute([
+        'id' => $id,
+        'status' => $status,
+        'status_email' => $status,
+        'status_user' => $status,
+        'awarded_at' => $awardedAt,
+        'failed_at' => $failedAt,
+        'error_message' => $errorMessage,
+    ]);
+
+    $stmt = $pdo->prepare('SELECT * FROM claims WHERE id = :id');
+    $stmt->execute(['id' => $id]);
+    $row = $stmt->fetch();
+    if (!is_array($row)) {
+        throw new AppError(500, 'storage_error', '无法读取余额记录。');
+    }
+    return app_db_claim_from_row($row);
+}
+
+function app_db_find_active_auto_claim(PDO $pdo, string $field, string $value): ?array
+{
+    $column = match ($field) {
+        'normalizedEmail' => 'normalized_email',
+        'userId' => 'user_id',
+        default => throw new AppError(500, 'internal_error', '未知查重字段。'),
+    };
+    $stmt = $pdo->prepare(
+        "SELECT * FROM claims
+         WHERE type = 'auto_claim' AND status <> 'failed' AND {$column} = :value
+         ORDER BY created_at DESC
+         LIMIT 1"
+    );
+    $stmt->execute(['value' => $value]);
+    $row = $stmt->fetch();
+    return is_array($row) ? app_db_claim_from_row($row) : null;
+}
+
 function app_find_active_claim(array $claims, callable $predicate): ?array
 {
     foreach ($claims as $claim) {
@@ -663,8 +1038,100 @@ function app_find_active_claim(array $claims, callable $predicate): ?array
     return null;
 }
 
+function app_process_claim_db(string $email, string $remoteIp): array
+{
+    $pdo = app_database();
+    $pdo->beginTransaction();
+
+    try {
+        $existingByEmail = app_db_find_active_auto_claim($pdo, 'normalizedEmail', $email);
+        if (($existingByEmail['status'] ?? '') === 'completed') {
+            throw new AppError(409, 'already_claimed', '该邮箱已经领取过 10 刀。');
+        }
+        if (($existingByEmail['status'] ?? '') === 'pending') {
+            throw new AppError(409, 'claim_pending', '该邮箱的领取请求正在处理中，请稍后再试。');
+        }
+
+        $token = app_admin_login_token();
+        $user = app_find_user_by_email($token, $email);
+        if ($user === null) {
+            throw new AppError(404, 'user_not_found', '无该账户。');
+        }
+
+        $userId = (string) ($user['id'] ?? '');
+        $existingByUserId = app_db_find_active_auto_claim($pdo, 'userId', $userId);
+        if (($existingByUserId['status'] ?? '') === 'completed') {
+            throw new AppError(409, 'already_claimed', '该账户已经领取过 10 刀。');
+        }
+        if (($existingByUserId['status'] ?? '') === 'pending') {
+            throw new AppError(409, 'claim_pending', '该账户的领取请求正在处理中，请稍后再试。');
+        }
+
+        $record = [
+            'id' => bin2hex(random_bytes(16)),
+            'type' => 'auto_claim',
+            'userId' => $userId,
+            'email' => (string) ($user['email'] ?? $email),
+            'normalizedEmail' => $email,
+            'amount' => app_config()['claim_amount'],
+            'status' => 'pending',
+            'remoteIp' => $remoteIp,
+            'notes' => app_config()['claim_notes'],
+            'createdAt' => gmdate('c'),
+            'awardedAt' => null,
+            'failedAt' => null,
+            'errorMessage' => null,
+        ];
+        try {
+            app_db_insert_claim($pdo, $record);
+        } catch (PDOException $error) {
+            if (($error->errorInfo[1] ?? null) === 1062) {
+                throw new AppError(409, 'already_claimed', '该邮箱或账户已经提交过领取请求。');
+            }
+            throw $error;
+        }
+        $pdo->commit();
+
+        try {
+            $notes = app_config()['claim_notes'] . ' [claim:' . $record['id'] . ']';
+            app_add_user_balance($token, $userId, (float) app_config()['claim_amount'], $notes);
+            $record = app_db_update_claim_status($pdo, $record['id'], 'completed', gmdate('c'), null, null);
+            return [
+                'user' => [
+                    'id' => $user['id'],
+                    'email' => $user['email'],
+                ],
+                'amount' => app_config()['claim_amount'],
+                'awardedAt' => $record['awardedAt'],
+            ];
+        } catch (Throwable $error) {
+            app_db_update_claim_status(
+                $pdo,
+                $record['id'],
+                'failed',
+                null,
+                gmdate('c'),
+                $error instanceof AppError ? $error->getMessage() : '未知错误'
+            );
+            throw $error;
+        }
+    } catch (Throwable $error) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        if ($error instanceof AppError) {
+            throw $error;
+        }
+        throw new AppError(500, 'internal_error', '发放额度时发生异常。');
+    }
+}
+
 function app_process_claim(string $email, string $remoteIp): array
 {
+    if (app_uses_database()) {
+        return app_process_claim_db($email, $remoteIp);
+    }
+
     return app_with_lock('claims', function () use ($email, $remoteIp): array {
         $store = app_load_claims_store();
         $claims = $store['claims'] ?? [];
@@ -752,8 +1219,72 @@ function app_process_claim(string $email, string $remoteIp): array
     });
 }
 
+function app_process_manual_balance_db(string $email, float $amount, string $notes, string $remoteIp): array
+{
+    $pdo = app_database();
+    $token = app_admin_login_token();
+    $user = app_find_user_by_email($token, $email);
+    if ($user === null) {
+        throw new AppError(404, 'user_not_found', '无该账户。');
+    }
+
+    $userId = (string) ($user['id'] ?? '');
+    if ($userId === '') {
+        throw new AppError(502, 'unexpected_users_response', '用户信息缺少 ID。');
+    }
+
+    $recordNotes = trim($notes) !== '' ? trim($notes) : '管理员手动加余额';
+    $record = [
+        'id' => bin2hex(random_bytes(16)),
+        'type' => 'manual_balance',
+        'userId' => $userId,
+        'email' => (string) ($user['email'] ?? $email),
+        'normalizedEmail' => $email,
+        'amount' => $amount,
+        'status' => 'pending',
+        'remoteIp' => $remoteIp,
+        'notes' => $recordNotes,
+        'createdAt' => gmdate('c'),
+        'awardedAt' => null,
+        'failedAt' => null,
+        'errorMessage' => null,
+    ];
+
+    app_db_insert_claim($pdo, $record);
+
+    try {
+        app_add_user_balance($token, $userId, $amount, $recordNotes . ' [manual:' . $record['id'] . ']');
+        $record = app_db_update_claim_status($pdo, $record['id'], 'completed', gmdate('c'), null, null);
+        return [
+            'record' => $record,
+            'user' => [
+                'id' => $user['id'],
+                'email' => $user['email'],
+            ],
+            'amount' => $amount,
+        ];
+    } catch (Throwable $error) {
+        app_db_update_claim_status(
+            $pdo,
+            $record['id'],
+            'failed',
+            null,
+            gmdate('c'),
+            $error instanceof AppError ? $error->getMessage() : '未知错误'
+        );
+        if ($error instanceof AppError) {
+            throw $error;
+        }
+        throw new AppError(500, 'internal_error', '添加余额时发生异常。');
+    }
+}
+
 function app_process_manual_balance(string $email, float $amount, string $notes, string $remoteIp): array
 {
+    if (app_uses_database()) {
+        return app_process_manual_balance_db($email, $amount, $notes, $remoteIp);
+    }
+
     return app_with_lock('claims', function () use ($email, $amount, $notes, $remoteIp): array {
         $store = app_load_claims_store();
 
@@ -845,6 +1376,45 @@ function app_compare_values($a, $b, string $direction): int
 
 function app_list_claims(array $options = []): array
 {
+    if (app_uses_database()) {
+        $search = app_normalize_email((string) ($options['search'] ?? ''));
+        $status = (string) ($options['status'] ?? '');
+        $sortBy = (string) ($options['sortBy'] ?? 'awardedAt');
+        $sortOrder = (string) ($options['sortOrder'] ?? 'desc');
+        $allowedSorts = [
+            'email' => 'email',
+            'createdAt' => 'created_at',
+            'awardedAt' => 'awarded_at',
+            'type' => 'type',
+            'status' => 'status',
+            'amount' => 'amount',
+        ];
+        $sortColumn = $allowedSorts[$sortBy] ?? 'awarded_at';
+        $direction = $sortOrder === 'asc' ? 'ASC' : 'DESC';
+        $where = [];
+        $params = [];
+
+        if ($search !== '') {
+            $where[] = 'normalized_email LIKE :search';
+            $params['search'] = '%' . $search . '%';
+        }
+        if ($status !== '') {
+            $where[] = 'status = :status';
+            $params['status'] = $status;
+        }
+
+        $sql = 'SELECT * FROM claims';
+        if ($where !== []) {
+            $sql .= ' WHERE ' . implode(' AND ', $where);
+        }
+        $sql .= " ORDER BY {$sortColumn} {$direction}, created_at DESC";
+
+        $stmt = app_database()->prepare($sql);
+        $stmt->execute($params);
+        $rows = $stmt->fetchAll();
+        return array_map(static fn (array $row) => app_db_claim_from_row($row), $rows);
+    }
+
     $store = app_load_claims_store();
     $items = $store['claims'] ?? [];
     $search = app_normalize_email((string) ($options['search'] ?? ''));
@@ -921,6 +1491,19 @@ function app_guess_upload_extension(array $file): string
 
 function app_list_gallery(): array
 {
+    if (app_uses_database()) {
+        $stmt = app_database()->query('SELECT * FROM gallery_images ORDER BY sort_order ASC, created_at DESC');
+        $rows = $stmt->fetchAll();
+        return array_map(static fn (array $item, int $index) => [
+            'id' => $item['id'] ?? '',
+            'title' => $item['title'] ?? '',
+            'alt' => $item['alt'] ?? '',
+            'createdAt' => $item['created_at'] ?? null,
+            'order' => $index,
+            'url' => '/media/' . rawurlencode((string) ($item['id'] ?? '')),
+        ], $rows, array_keys($rows));
+    }
+
     $store = app_load_gallery_store();
     $images = $store['images'] ?? [];
     $items = [];
@@ -975,6 +1558,60 @@ function app_store_gallery_image(array $file, array $fields): array
         'originalName' => (string) ($file['name'] ?? $title),
     ];
 
+    if (app_uses_database()) {
+        $pdo = app_database();
+        $pdo->beginTransaction();
+        try {
+            $pdo->exec('UPDATE gallery_images SET sort_order = sort_order + 1');
+            $stmt = $pdo->prepare(
+                'INSERT INTO gallery_images (id, title, alt, content_type, original_name, sort_order, created_at)
+                 VALUES (:id, :title, :alt, :content_type, :original_name, 0, :created_at)'
+            );
+            $stmt->execute([
+                'id' => $record['id'],
+                'title' => $record['title'],
+                'alt' => $record['alt'],
+                'content_type' => $record['contentType'],
+                'original_name' => $record['originalName'],
+                'created_at' => $record['createdAt'],
+            ]);
+
+            $limit = app_config()['gallery_upload_max_files'];
+            $stmt = $pdo->prepare('SELECT id FROM gallery_images ORDER BY sort_order ASC, created_at DESC LIMIT 18446744073709551615 OFFSET :limit');
+            $stmt->bindValue('limit', $limit, PDO::PARAM_INT);
+            $stmt->execute();
+            $removedIds = array_map(static fn (array $row) => (string) $row['id'], $stmt->fetchAll());
+            if ($removedIds !== []) {
+                $placeholders = implode(',', array_fill(0, count($removedIds), '?'));
+                $delete = $pdo->prepare("DELETE FROM gallery_images WHERE id IN ({$placeholders})");
+                $delete->execute($removedIds);
+            }
+            $pdo->commit();
+            foreach ($removedIds as $removedId) {
+                $removedFile = APP_GALLERY_DIR . '/' . basename($removedId);
+                if (is_file($removedFile)) {
+                    @unlink($removedFile);
+                }
+            }
+        } catch (Throwable $error) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            if (is_file($target)) {
+                @unlink($target);
+            }
+            throw $error;
+        }
+
+        return [
+            'id' => $record['id'],
+            'title' => $record['title'],
+            'alt' => $record['alt'],
+            'createdAt' => $record['createdAt'],
+            'url' => '/media/' . rawurlencode($record['id']),
+        ];
+    }
+
     app_with_lock('gallery', static function () use ($record): void {
         $store = app_load_gallery_store();
         $images = $store['images'] ?? [];
@@ -995,6 +1632,23 @@ function app_store_gallery_image(array $file, array $fields): array
 
 function app_delete_gallery_image(string $id): void
 {
+    if (app_uses_database()) {
+        $pdo = app_database();
+        $stmt = $pdo->prepare('SELECT * FROM gallery_images WHERE id = :id');
+        $stmt->execute(['id' => $id]);
+        $item = $stmt->fetch();
+        if (!is_array($item)) {
+            throw new AppError(404, 'not_found', '图片不存在。');
+        }
+        $delete = $pdo->prepare('DELETE FROM gallery_images WHERE id = :id');
+        $delete->execute(['id' => $id]);
+        $file = APP_GALLERY_DIR . '/' . basename((string) $item['id']);
+        if (is_file($file)) {
+            @unlink($file);
+        }
+        return;
+    }
+
     app_with_lock('gallery', static function () use ($id): void {
         $store = app_load_gallery_store();
         $images = $store['images'] ?? [];
@@ -1021,6 +1675,38 @@ function app_delete_gallery_image(string $id): void
 
 function app_move_gallery_image(string $id, string $direction): void
 {
+    if (app_uses_database()) {
+        $pdo = app_database();
+        $items = $pdo->query('SELECT id FROM gallery_images ORDER BY sort_order ASC, created_at DESC')->fetchAll();
+        $ids = array_map(static fn (array $row) => (string) $row['id'], $items);
+        $index = array_search($id, $ids, true);
+        if ($index === false) {
+            throw new AppError(404, 'not_found', '图片不存在。');
+        }
+        $target = $direction === 'up' ? $index - 1 : $index + 1;
+        if ($target < 0 || $target >= count($ids)) {
+            return;
+        }
+        [$ids[$index], $ids[$target]] = [$ids[$target], $ids[$index]];
+        $pdo->beginTransaction();
+        try {
+            $stmt = $pdo->prepare('UPDATE gallery_images SET sort_order = :sort_order WHERE id = :id');
+            foreach ($ids as $sortOrder => $imageId) {
+                $stmt->execute([
+                    'sort_order' => $sortOrder,
+                    'id' => $imageId,
+                ]);
+            }
+            $pdo->commit();
+        } catch (Throwable $error) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            throw $error;
+        }
+        return;
+    }
+
     app_with_lock('gallery', static function () use ($id, $direction): void {
         $store = app_load_gallery_store();
         $images = $store['images'] ?? [];
