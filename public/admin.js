@@ -19,11 +19,28 @@ const galleryStatusCard = document.querySelector("#gallery-status");
 const galleryStatusTitle = document.querySelector("#gallery-status-title");
 const galleryStatusMessage = document.querySelector("#gallery-status-message");
 const galleryAdminGrid = document.querySelector("#gallery-admin-grid");
+const balanceForm = document.querySelector("#balance-form");
+const balanceEmailInput = document.querySelector("#balance-email");
+const balanceAmountInput = document.querySelector("#balance-amount");
+const balanceNotesInput = document.querySelector("#balance-notes");
+const balanceSubmitButton = document.querySelector("#balance-submit");
+const balanceStatusCard = document.querySelector("#balance-status");
+const balanceStatusTitle = document.querySelector("#balance-status-title");
+const balanceStatusMessage = document.querySelector("#balance-status-message");
 
 function setStatus(card, titleNode, messageNode, tone, title, message) {
   card.className = `status-card status-${tone}`;
   titleNode.textContent = title;
   messageNode.textContent = message;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function setRecordsBusy(busy) {
@@ -36,6 +53,12 @@ function setUploadBusy(busy) {
   uploadSubmitButton.disabled = busy;
   uploadSubmitButton.classList.toggle("is-processing", busy);
   uploadSubmitButton.querySelector(".submit-button__label").textContent = busy ? "上传中" : "上传图片";
+}
+
+function setBalanceBusy(busy) {
+  balanceSubmitButton.disabled = busy;
+  balanceSubmitButton.classList.toggle("is-processing", busy);
+  balanceSubmitButton.querySelector(".submit-button__label").textContent = busy ? "添加中" : "添加余额";
 }
 
 function formatDate(value) {
@@ -52,7 +75,7 @@ function formatDate(value) {
 function renderRows(items) {
   recordsTotal.textContent = `${items.length} 条`;
   if (!items.length) {
-    recordsBody.innerHTML = '<tr><td colspan="5" class="records-empty">暂无记录</td></tr>';
+    recordsBody.innerHTML = '<tr><td colspan="7" class="records-empty">暂无记录</td></tr>';
     return;
   }
 
@@ -61,14 +84,20 @@ function renderRows(items) {
     pending: "处理中",
     failed: "失败"
   };
+  const typeMap = {
+    auto_claim: "自助领取",
+    manual_balance: "手动加余额"
+  };
 
   recordsBody.innerHTML = items.map((item) => `
     <tr>
-      <td>${item.email}</td>
-      <td>${item.amount}</td>
-      <td>${statusMap[item.status] || item.status}</td>
+      <td>${escapeHtml(item.email)}</td>
+      <td>${escapeHtml(typeMap[item.type] || item.type || "-")}</td>
+      <td>${escapeHtml(item.amount)}</td>
+      <td>${escapeHtml(statusMap[item.status] || item.status)}</td>
       <td>${formatDate(item.createdAt)}</td>
       <td>${formatDate(item.awardedAt)}</td>
+      <td>${escapeHtml(item.notes || "-")}</td>
     </tr>
   `).join("");
 }
@@ -79,6 +108,10 @@ function getAccessKey() {
 
 function galleryStatus(tone, title, message) {
   setStatus(galleryStatusCard, galleryStatusTitle, galleryStatusMessage, tone, title, message);
+}
+
+function balanceStatus(tone, title, message) {
+  setStatus(balanceStatusCard, balanceStatusTitle, balanceStatusMessage, tone, title, message);
 }
 
 async function loadGalleryAdmin() {
@@ -103,11 +136,11 @@ async function loadGalleryAdmin() {
     }
 
     galleryAdminGrid.innerHTML = items.map((item, index) => `
-      <article class="gallery-admin-card" data-id="${item.id}">
-        <img src="${item.url}" alt="${item.alt || item.title || "二维码"}" />
+      <article class="gallery-admin-card" data-id="${escapeHtml(item.id)}">
+        <img src="${escapeHtml(item.url)}" alt="${escapeHtml(item.alt || item.title || "二维码")}" />
         <div class="gallery-admin-meta">
-          <strong>${item.title || "未命名图片"}</strong>
-          <span>${item.alt || "-"}</span>
+          <strong>${escapeHtml(item.title || "未命名图片")}</strong>
+          <span>${escapeHtml(item.alt || "-")}</span>
         </div>
         <div class="gallery-admin-actions">
           <button type="button" data-action="up" ${index === 0 ? "disabled" : ""}>上移</button>
@@ -164,6 +197,61 @@ form.addEventListener("submit", async (event) => {
     setStatus(statusCard, statusTitle, statusMessage, "error", "请求失败", "网络异常或服务不可用，请稍后再试。");
   } finally {
     setRecordsBusy(false);
+  }
+});
+
+balanceForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+
+  const accessKey = getAccessKey();
+  const email = balanceEmailInput.value.trim();
+  const amount = Number(balanceAmountInput.value);
+
+  if (!accessKey) {
+    balanceStatus("error", "访问密钥不能为空", "请先输入访问密钥。");
+    return;
+  }
+
+  if (!email) {
+    balanceStatus("error", "邮箱不能为空", "请输入需要添加余额的用户邮箱。");
+    return;
+  }
+
+  if (!Number.isFinite(amount) || amount <= 0) {
+    balanceStatus("error", "金额无效", "请输入大于 0 的金额。");
+    return;
+  }
+
+  setBalanceBusy(true);
+  balanceStatus("pending", "正在添加", "正在核验用户并添加余额。");
+
+  try {
+    const response = await fetch("/api/admin/balance", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        email,
+        amount,
+        notes: balanceNotesInput.value.trim()
+      })
+    });
+
+    const payload = await response.json().catch(() => ({ message: "操作失败。" }));
+    if (!response.ok) {
+      balanceStatus("error", "添加失败", payload.message || "无法添加余额。");
+      return;
+    }
+
+    balanceStatus("success", "添加成功", payload.message || "余额已添加。");
+    balanceForm.reset();
+    form.requestSubmit();
+  } catch {
+    balanceStatus("error", "请求失败", "网络异常或服务不可用，请稍后再试。");
+  } finally {
+    setBalanceBusy(false);
   }
 });
 

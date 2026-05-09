@@ -9,7 +9,6 @@ const statusTitle = document.querySelector("#status-title");
 const statusMessage = document.querySelector("#status-message");
 const amountNodes = document.querySelectorAll("[data-claim-amount]");
 const submitButtonLabel = document.querySelector("[data-submit-label]");
-const galleryStrip = document.querySelector("#gallery-strip");
 let captchaToken = "";
 
 function setStatus(tone, title, message) {
@@ -67,32 +66,6 @@ async function loadConfig() {
     });
   } catch {
     // Keep the default copy if config loading fails.
-  }
-}
-
-async function loadGallery() {
-  if (!galleryStrip) {
-    return;
-  }
-
-  try {
-    const response = await fetch("/api/gallery", { cache: "no-store" });
-    const payload = await response.json().catch(() => ({ items: [] }));
-    const items = Array.isArray(payload.items) ? payload.items : [];
-
-    if (!items.length) {
-      galleryStrip.innerHTML = '<div class="gallery-empty">暂无二维码，请到管理端上传。</div>';
-      return;
-    }
-
-    galleryStrip.innerHTML = items.map((item) => `
-      <figure class="gallery-item">
-        <img src="${item.url}" alt="${item.alt || item.title || "二维码"}" />
-        <figcaption><a href="${item.url}" target="_blank" rel="noreferrer">${item.title || "二维码"}</a></figcaption>
-      </figure>
-    `).join("");
-  } catch {
-    galleryStrip.innerHTML = '<div class="gallery-empty">二维码加载失败。</div>';
   }
 }
 
@@ -182,4 +155,3 @@ if (captchaImage) {
     setStatus("error", "验证码加载失败", "请刷新页面后重试。");
   });
 }
-loadGallery();

@@ -208,6 +208,14 @@ function app_page_response(string $template): never
     exit;
 }
 
+function app_asset_url(string $relativePath): string
+{
+    $clean = '/' . ltrim($relativePath, '/');
+    $fullPath = APP_BASE_DIR . $clean;
+    $version = is_file($fullPath) ? (string) filemtime($fullPath) : (string) time();
+    return $clean . '?v=' . rawurlencode($version);
+}
+
 function app_not_found(): never
 {
     app_json_response(404, [
@@ -619,9 +627,8 @@ function app_find_user_by_email(string $token, string $email): ?array
     return null;
 }
 
-function app_add_user_balance(string $token, int|string $userId, float $amount, string $claimId): void
+function app_add_user_balance(string $token, int|string $userId, float $amount, string $notes): void
 {
-    $config = app_config();
     app_upstream_json(
         'POST',
         '/api/v1/admin/users/' . rawurlencode((string) $userId) . '/balance',
@@ -629,7 +636,7 @@ function app_add_user_balance(string $token, int|string $userId, float $amount, 
         [
             'balance' => $amount,
             'operation' => 'add',
-            'notes' => $config['claim_notes'] . ' [claim:' . $claimId . ']',
+            'notes' => $notes,
         ],
         $token
     );
@@ -648,7 +655,8 @@ function app_save_claims_store(array $store): void
 function app_find_active_claim(array $claims, callable $predicate): ?array
 {
     foreach ($claims as $claim) {
-        if (($claim['status'] ?? '') !== 'failed' && $predicate($claim)) {
+        $type = (string) ($claim['type'] ?? 'auto_claim');
+        if ($type === 'auto_claim' && ($claim['status'] ?? '') !== 'failed' && $predicate($claim)) {
             return $claim;
         }
     }
@@ -686,12 +694,14 @@ function app_process_claim(string $email, string $remoteIp): array
 
         $record = [
             'id' => bin2hex(random_bytes(16)),
+            'type' => 'auto_claim',
             'userId' => $userId,
             'email' => (string) ($user['email'] ?? $email),
             'normalizedEmail' => $email,
             'amount' => app_config()['claim_amount'],
             'status' => 'pending',
             'remoteIp' => $remoteIp,
+            'notes' => app_config()['claim_notes'],
             'createdAt' => gmdate('c'),
             'awardedAt' => null,
             'failedAt' => null,
@@ -702,7 +712,8 @@ function app_process_claim(string $email, string $remoteIp): array
         app_save_claims_store($store);
 
         try {
-            app_add_user_balance($token, $userId, (float) app_config()['claim_amount'], $record['id']);
+            $notes = app_config()['claim_notes'] . ' [claim:' . $record['id'] . ']';
+            app_add_user_balance($token, $userId, (float) app_config()['claim_amount'], $notes);
             foreach ($store['claims'] as &$claim) {
                 if (($claim['id'] ?? '') === $record['id']) {
                     $claim['status'] = 'completed';
@@ -741,6 +752,82 @@ function app_process_claim(string $email, string $remoteIp): array
     });
 }
 
+function app_process_manual_balance(string $email, float $amount, string $notes, string $remoteIp): array
+{
+    return app_with_lock('claims', function () use ($email, $amount, $notes, $remoteIp): array {
+        $store = app_load_claims_store();
+
+        $token = app_admin_login_token();
+        $user = app_find_user_by_email($token, $email);
+        if ($user === null) {
+            throw new AppError(404, 'user_not_found', '无该账户。');
+        }
+
+        $userId = (string) ($user['id'] ?? '');
+        if ($userId === '') {
+            throw new AppError(502, 'unexpected_users_response', '用户信息缺少 ID。');
+        }
+
+        $recordNotes = trim($notes) !== '' ? trim($notes) : '管理员手动加余额';
+        $record = [
+            'id' => bin2hex(random_bytes(16)),
+            'type' => 'manual_balance',
+            'userId' => $userId,
+            'email' => (string) ($user['email'] ?? $email),
+            'normalizedEmail' => $email,
+            'amount' => $amount,
+            'status' => 'pending',
+            'remoteIp' => $remoteIp,
+            'notes' => $recordNotes,
+            'createdAt' => gmdate('c'),
+            'awardedAt' => null,
+            'failedAt' => null,
+            'errorMessage' => null,
+        ];
+
+        $store['claims'][] = $record;
+        app_save_claims_store($store);
+
+        try {
+            app_add_user_balance($token, $userId, $amount, $recordNotes . ' [manual:' . $record['id'] . ']');
+            foreach ($store['claims'] as &$claim) {
+                if (($claim['id'] ?? '') === $record['id']) {
+                    $claim['status'] = 'completed';
+                    $claim['awardedAt'] = gmdate('c');
+                    $record = $claim;
+                    break;
+                }
+            }
+            unset($claim);
+            app_save_claims_store($store);
+
+            return [
+                'record' => $record,
+                'user' => [
+                    'id' => $user['id'],
+                    'email' => $user['email'],
+                ],
+                'amount' => $amount,
+            ];
+        } catch (Throwable $error) {
+            foreach ($store['claims'] as &$claim) {
+                if (($claim['id'] ?? '') === $record['id']) {
+                    $claim['status'] = 'failed';
+                    $claim['failedAt'] = gmdate('c');
+                    $claim['errorMessage'] = $error instanceof AppError ? $error->getMessage() : '未知错误';
+                    break;
+                }
+            }
+            unset($claim);
+            app_save_claims_store($store);
+            if ($error instanceof AppError) {
+                throw $error;
+            }
+            throw new AppError(500, 'internal_error', '添加余额时发生异常。');
+        }
+    });
+}
+
 function app_compare_values($a, $b, string $direction): int
 {
     $multiplier = $direction === 'asc' ? 1 : -1;
@@ -773,7 +860,7 @@ function app_list_claims(array $options = []): array
         $items = array_values(array_filter($items, static fn ($item) => (string) ($item['status'] ?? '') === $status));
     }
 
-    $allowedSorts = ['email', 'createdAt', 'awardedAt', 'status', 'amount'];
+    $allowedSorts = ['email', 'createdAt', 'awardedAt', 'type', 'status', 'amount'];
     if (!in_array($sortBy, $allowedSorts, true)) {
         $sortBy = 'awardedAt';
     }
@@ -782,7 +869,7 @@ function app_list_claims(array $options = []): array
     usort($items, static function (array $left, array $right) use ($sortBy, $sortOrder): int {
         $a = $left[$sortBy] ?? null;
         $b = $right[$sortBy] ?? null;
-        if ($sortBy === 'email' || $sortBy === 'status') {
+        if ($sortBy === 'email' || $sortBy === 'type' || $sortBy === 'status') {
             $a = (string) $a;
             $b = (string) $b;
         }
@@ -791,6 +878,7 @@ function app_list_claims(array $options = []): array
 
     return array_map(static fn ($claim) => [
         'id' => $claim['id'] ?? '',
+        'type' => $claim['type'] ?? 'auto_claim',
         'email' => $claim['email'] ?? '',
         'userId' => $claim['userId'] ?? '',
         'amount' => $claim['amount'] ?? 0,
@@ -799,6 +887,7 @@ function app_list_claims(array $options = []): array
         'awardedAt' => $claim['awardedAt'] ?? null,
         'failedAt' => $claim['failedAt'] ?? null,
         'remoteIp' => $claim['remoteIp'] ?? '',
+        'notes' => $claim['notes'] ?? '',
         'errorMessage' => $claim['errorMessage'] ?? null,
     ], $items);
 }
@@ -1056,6 +1145,31 @@ function app_dispatch(string $method, string $path): never
                 'sortOrder' => $_GET['sortOrder'] ?? 'desc',
             ]);
             app_json_response(200, ['items' => $items, 'total' => count($items)]);
+        }
+
+        if ($method === 'POST' && $path === '/api/admin/balance') {
+            app_require_records_access();
+            app_assert_config();
+            $body = app_read_json_body();
+            $email = app_normalize_email((string) ($body['email'] ?? ''));
+            $amount = (float) ($body['amount'] ?? 0);
+            $notes = trim((string) ($body['notes'] ?? ''));
+
+            if (!app_is_valid_email($email)) {
+                throw new AppError(400, 'invalid_email', '请输入有效邮箱。');
+            }
+            if (!is_numeric((string) ($body['amount'] ?? '')) || $amount <= 0) {
+                throw new AppError(400, 'invalid_amount', '金额必须是大于 0 的数字。');
+            }
+
+            $result = app_process_manual_balance($email, $amount, $notes, $ip);
+            app_json_response(200, [
+                'ok' => true,
+                'message' => '已为 ' . $result['user']['email'] . ' 添加 ' . $result['amount'] . ' 余额。',
+                'record' => $result['record'],
+                'user' => $result['user'],
+                'amount' => $result['amount'],
+            ]);
         }
 
         if ($method === 'POST' && $path === '/api/gallery/upload') {

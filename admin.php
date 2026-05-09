@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>管理后台</title>
-    <link rel="stylesheet" href="/public/styles.css" />
+    <link rel="stylesheet" href="<?= htmlspecialchars(app_asset_url('public/styles.css'), ENT_QUOTES, 'UTF-8') ?>" />
   </head>
   <body>
     <div class="void-glow glow-cyan"></div>
@@ -68,6 +68,7 @@
                   <option value="awardedAt">领取时间</option>
                   <option value="createdAt">创建时间</option>
                   <option value="email">邮箱</option>
+                  <option value="type">类型</option>
                   <option value="status">状态</option>
                   <option value="amount">金额</option>
                 </select>
@@ -97,20 +98,65 @@
           <p id="admin-status-message" class="status-message">输入访问密钥后即可查看记录。</p>
         </section>
 
+        <section class="admin-section">
+          <div class="section-head">
+            <h2 class="section-title">添加用户余额</h2>
+            <p class="section-desc">输入用户邮箱和金额，系统会核验账户后添加余额，并写入下方记录。</p>
+          </div>
+
+          <form id="balance-form" class="claim-form admin-auth-form">
+            <div class="admin-filters admin-filters-three">
+              <label class="field">
+                <span class="field-label">用户邮箱</span>
+                <div class="input-shell">
+                  <input id="balance-email" type="email" placeholder="user@example.com" required />
+                </div>
+              </label>
+
+              <label class="field">
+                <span class="field-label">添加金额</span>
+                <div class="input-shell">
+                  <input id="balance-amount" type="number" min="0.01" step="0.01" placeholder="10" required />
+                </div>
+              </label>
+
+              <label class="field">
+                <span class="field-label">备注</span>
+                <div class="input-shell">
+                  <input id="balance-notes" type="text" placeholder="管理员手动加余额" />
+                </div>
+              </label>
+            </div>
+
+            <button id="balance-submit" class="submit-button" type="submit">
+              <span class="submit-button__label">添加余额</span>
+              <span class="submit-button__value">手动操作</span>
+            </button>
+          </form>
+
+          <section id="balance-status" class="status-card status-idle" aria-live="polite">
+            <p class="status-eyebrow">操作状态</p>
+            <p id="balance-status-title" class="status-title">等待操作</p>
+            <p id="balance-status-message" class="status-message">添加成功后会自动刷新领取记录。</p>
+          </section>
+        </section>
+
         <div class="records-table-wrap">
           <table class="records-table">
             <thead>
               <tr>
                 <th>邮箱</th>
+                <th>类型</th>
                 <th>金额</th>
                 <th>状态</th>
                 <th>创建时间</th>
                 <th>领取时间</th>
+                <th>备注</th>
               </tr>
             </thead>
             <tbody id="records-body">
               <tr>
-                <td colspan="5" class="records-empty">暂无数据</td>
+                <td colspan="7" class="records-empty">暂无数据</td>
               </tr>
             </tbody>
           </table>
@@ -163,6 +209,6 @@
       </section>
     </main>
 
-    <script src="/public/admin.js" defer></script>
+    <script src="<?= htmlspecialchars(app_asset_url('public/admin.js'), ENT_QUOTES, 'UTF-8') ?>" defer></script>
   </body>
 </html>

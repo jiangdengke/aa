@@ -8,7 +8,7 @@
       name="description"
       content="输入注册邮箱，自助领取一次 10 刀额度。"
     />
-    <link rel="stylesheet" href="/public/styles.css" />
+    <link rel="stylesheet" href="<?= htmlspecialchars(app_asset_url('public/styles.css'), ENT_QUOTES, 'UTF-8') ?>" />
   </head>
   <body>
     <div class="void-glow glow-cyan"></div>
@@ -35,16 +35,37 @@
           </div>
         </section>
 
+        <?php $galleryItems = app_list_gallery(); ?>
         <section class="gallery-card">
           <div class="gallery-head">
             <p class="status-eyebrow">群二维码</p>
             <p class="gallery-hint">扫码进群，参与不定时抽奖。</p>
           </div>
-          <div id="gallery-strip" class="gallery-strip"></div>
+          <div class="gallery-strip">
+            <?php if ($galleryItems === []): ?>
+              <div class="gallery-empty">暂无二维码，请到管理后台上传。</div>
+            <?php else: ?>
+              <?php foreach ($galleryItems as $item): ?>
+                <figure class="gallery-item">
+                  <img
+                    src="<?= htmlspecialchars($item['url'], ENT_QUOTES, 'UTF-8') ?>"
+                    alt="<?= htmlspecialchars((string) ($item['alt'] ?? $item['title'] ?? '二维码'), ENT_QUOTES, 'UTF-8') ?>"
+                  />
+                  <figcaption>
+                    <a
+                      href="<?= htmlspecialchars($item['url'], ENT_QUOTES, 'UTF-8') ?>"
+                      target="_blank"
+                      rel="noreferrer"
+                    ><?= htmlspecialchars((string) ($item['title'] ?? '二维码'), ENT_QUOTES, 'UTF-8') ?></a>
+                  </figcaption>
+                </figure>
+              <?php endforeach; ?>
+            <?php endif; ?>
+          </div>
         </section>
       </section>
     </main>
 
-    <script src="/public/app.js" defer></script>
+    <script src="<?= htmlspecialchars(app_asset_url('public/app.js'), ENT_QUOTES, 'UTF-8') ?>" defer></script>
   </body>
 </html>

@@ -20,6 +20,7 @@
 - `data/claims.json`: 领取记录
 - `data/gallery.json`: 二维码图库元数据
 - `data/gallery/`: 二维码图片目录
+- `data/locks/`: 文件锁目录
 
 ## 配置
 
@@ -116,6 +117,7 @@ Compose 配置文件在 [docker-compose.yml](/home/jdk/code/aa/docker-compose.ym
 - `GET /api/captcha`
 - `POST /api/claim`
 - `GET /api/admin/claims`
+- `POST /api/admin/balance`
 - `GET /api/gallery`
 - `POST /api/gallery/upload`
 - `DELETE /api/gallery/:id`
@@ -132,6 +134,7 @@ Compose 配置文件在 [docker-compose.yml](/home/jdk/code/aa/docker-compose.ym
 - 已接入服务端验证码，领取时必须输入正确验证码
 - 验证码带有效期、尝试次数限制和刷新频率限制
 - 已接入领取记录查询接口，必须提供 `RECORDS_ACCESS_KEY` 才能读取
+- 管理后台可按邮箱给用户手动添加自定义余额，操作记录会写入 `data/claims.json`
 - 已接入二维码图片上传接口，使用同一个 `RECORDS_ACCESS_KEY` 管理
 - 管理后台已支持查看记录、上传二维码、删除二维码、调整图片顺序
 
