@@ -27,6 +27,7 @@
 先准备环境变量：
 
 - `BASE_URL`: 你的站点地址，默认 `https://ai.laodog.top`
+- `BIND_ADDRESS`: Docker host 网络下的监听地址，默认 `127.0.0.1`，方便只给宿主机 Nginx 反代
 - `UPSTREAM_BASE_URL`: 可选，后端调用上游接口的内部地址；为空时使用 `BASE_URL`
 - `UPSTREAM_HOST_HEADER`: 可选，当 `UPSTREAM_BASE_URL` 配成 IP 或内网域名时，用它指定上游需要的 `Host`
 - `ADMIN_EMAIL`: 管理员邮箱
@@ -107,10 +108,24 @@ Compose 配置文件在 [docker-compose.yml](/home/jdk/code/aa/docker-compose.ym
 
 - 读取当前目录的 `.env`
 - 把本地 `./data` 挂载到容器内 `/var/www/html/data`
-- 使用宿主机网络并监听 `3000`
+- 使用宿主机网络，并默认只监听 `127.0.0.1:3000`
 - 使用 `unless-stopped` 自动重启策略
 
-当前 Compose 使用 `network_mode: host`，这是为了避免 Docker bridge 网络下访问 `https://ai.laodog.top` 出现 TLS 超时。该配置适用于 Linux；如果部署在 Docker Desktop，需要改回端口映射模式。
+当前 Compose 使用 `network_mode: host`，这是为了避免 Docker bridge 网络下访问 `https://ai.laodog.top` 出现 TLS 超时。容器不会显示 Docker 端口映射，这是 host 网络的正常表现。
+
+默认 `BIND_ADDRESS=127.0.0.1`，服务只在宿主机本机监听，Nginx 可以这样反代：
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+如果你确实需要直接暴露端口，可把 `.env` 里的 `BIND_ADDRESS` 改成 `0.0.0.0`。该配置适用于 Linux；如果部署在 Docker Desktop，需要改回端口映射模式。
 
 ## 数据持久化
 
