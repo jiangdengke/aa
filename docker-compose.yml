@@ -7,7 +7,6 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    ports:
-      - "3000:3000"
+    network_mode: host
     volumes:
-      - ./data:/app/data
+      - ./data:/var/www/html/data

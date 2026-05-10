@@ -1,5 +1,5 @@
 const form = document.querySelector("#admin-form");
-const accessKeyInput = document.querySelector("#access-key");
+const logoutButton = document.querySelector("#admin-logout");
 const searchEmailInput = document.querySelector("#search-email");
 const statusFilter = document.querySelector("#status-filter");
 const sortBySelect = document.querySelector("#sort-by");
@@ -27,6 +27,10 @@ const balanceSubmitButton = document.querySelector("#balance-submit");
 const balanceStatusCard = document.querySelector("#balance-status");
 const balanceStatusTitle = document.querySelector("#balance-status-title");
 const balanceStatusMessage = document.querySelector("#balance-status-message");
+const logsBody = document.querySelector("#logs-body");
+const logsRefreshButton = document.querySelector("#logs-refresh");
+const tabButtons = document.querySelectorAll("[data-tab-target]");
+const tabPanels = document.querySelectorAll(".admin-panel");
 
 function setStatus(card, titleNode, messageNode, tone, title, message) {
   card.className = `status-card status-${tone}`;
@@ -103,7 +107,24 @@ function renderRows(items) {
 }
 
 function getAccessKey() {
-  return accessKeyInput.value.trim();
+  return "";
+}
+
+function isUnauthorized(response, payload) {
+  return response.status === 401 || payload?.error === "unauthorized";
+}
+
+function unauthorizedMessage() {
+  return "登录状态已失效，请刷新页面重新输入后台访问密钥。";
+}
+
+function adminHeaders(accessKey, extra = {}) {
+  const headers = { ...extra };
+  if (accessKey) {
+    headers.Authorization = `Bearer ${accessKey}`;
+    headers["X-Access-Key"] = accessKey;
+  }
+  return headers;
 }
 
 function galleryStatus(tone, title, message) {
@@ -114,18 +135,89 @@ function balanceStatus(tone, title, message) {
   setStatus(balanceStatusCard, balanceStatusTitle, balanceStatusMessage, tone, title, message);
 }
 
+function activateTab(targetId) {
+  tabButtons.forEach((button) => {
+    const isActive = button.dataset.tabTarget === targetId;
+    button.classList.toggle("is-active", isActive);
+  });
+  tabPanels.forEach((panel) => {
+    const isActive = panel.id === targetId;
+    panel.classList.toggle("is-active", isActive);
+    panel.hidden = !isActive;
+  });
+
+  if (targetId === "gallery-panel") {
+    loadGalleryAdmin();
+    return;
+  }
+  loadLogs();
+}
+
+function renderLogs(items) {
+  if (!logsBody) {
+    return;
+  }
+  if (!items.length) {
+    logsBody.innerHTML = '<tr><td colspan="7" class="records-empty">暂无日志</td></tr>';
+    return;
+  }
+
+  logsBody.innerHTML = items.map((item) => {
+    const context = item.context || {};
+    const detail = context.error || context.title || context.database || context.direction || "-";
+    return `
+      <tr>
+        <td>${formatDate(item.time)}</td>
+        <td>${escapeHtml(item.level || "-")}</td>
+        <td>${escapeHtml(item.message || "-")}</td>
+        <td>${escapeHtml(context.email || "-")}</td>
+        <td>${escapeHtml(context.userId || "-")}</td>
+        <td>${escapeHtml(context.amount || "-")}</td>
+        <td>${escapeHtml(detail)}</td>
+      </tr>
+    `;
+  }).join("");
+}
+
+async function loadLogs() {
+  const accessKey = getAccessKey();
+  if (!logsBody) {
+    renderLogs([]);
+    return;
+  }
+
+  logsRefreshButton.disabled = true;
+  try {
+    const response = await fetch("/api/admin/logs?limit=200", {
+      headers: adminHeaders(accessKey)
+    });
+    const payload = await response.json().catch(() => ({ items: [], message: "日志返回异常。" }));
+    if (!response.ok) {
+      renderLogs([{
+        time: new Date().toISOString(),
+        level: "ERROR",
+        message: isUnauthorized(response, payload) ? unauthorizedMessage() : (payload.message || "日志加载失败"),
+        context: {}
+      }]);
+      return;
+    }
+    renderLogs(Array.isArray(payload.items) ? payload.items : []);
+  } catch {
+    renderLogs([]);
+  } finally {
+    logsRefreshButton.disabled = false;
+  }
+}
+
 async function loadGalleryAdmin() {
   const accessKey = getAccessKey();
-  if (!accessKey || !galleryAdminGrid) {
-    galleryAdminGrid.innerHTML = '<div class="gallery-empty">输入访问密钥后可查看图片。</div>';
+  if (!galleryAdminGrid) {
     return;
   }
 
   try {
     const response = await fetch("/api/gallery", {
-      headers: {
-        Authorization: `Bearer ${accessKey}`
-      }
+      headers: adminHeaders(accessKey)
     });
     const payload = await response.json().catch(() => ({ items: [] }));
     const items = Array.isArray(payload.items) ? payload.items : [];
@@ -156,12 +248,7 @@ async function loadGalleryAdmin() {
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const accessKey = accessKeyInput.value.trim();
-
-  if (!accessKey) {
-    setStatus(statusCard, statusTitle, statusMessage, "error", "访问密钥不能为空", "请输入后端配置的访问密钥。");
-    return;
-  }
+  const accessKey = getAccessKey();
 
   setRecordsBusy(true);
   setStatus(statusCard, statusTitle, statusMessage, "pending", "正在查询", "正在读取领取记录。");
@@ -174,9 +261,7 @@ form.addEventListener("submit", async (event) => {
     url.searchParams.set("sortOrder", sortOrderSelect.value);
 
     const response = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${accessKey}`
-      }
+      headers: adminHeaders(accessKey)
     });
 
     const payload = await response.json().catch(() => ({
@@ -185,13 +270,14 @@ form.addEventListener("submit", async (event) => {
 
     if (!response.ok) {
       renderRows([]);
-      setStatus(statusCard, statusTitle, statusMessage, "error", "查询失败", payload.message || "无法读取记录。");
+      setStatus(statusCard, statusTitle, statusMessage, "error", "查询失败", isUnauthorized(response, payload) ? unauthorizedMessage() : (payload.message || "无法读取记录。"));
       return;
     }
 
     renderRows(payload.items || []);
     setStatus(statusCard, statusTitle, statusMessage, "success", "查询成功", `共找到 ${payload.total || 0} 条记录。`);
     await loadGalleryAdmin();
+    await loadLogs();
   } catch {
     renderRows([]);
     setStatus(statusCard, statusTitle, statusMessage, "error", "请求失败", "网络异常或服务不可用，请稍后再试。");
@@ -206,11 +292,6 @@ balanceForm?.addEventListener("submit", async (event) => {
   const accessKey = getAccessKey();
   const email = balanceEmailInput.value.trim();
   const amount = Number(balanceAmountInput.value);
-
-  if (!accessKey) {
-    balanceStatus("error", "访问密钥不能为空", "请先输入访问密钥。");
-    return;
-  }
 
   if (!email) {
     balanceStatus("error", "邮箱不能为空", "请输入需要添加余额的用户邮箱。");
@@ -228,10 +309,9 @@ balanceForm?.addEventListener("submit", async (event) => {
   try {
     const response = await fetch("/api/admin/balance", {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessKey}`,
+      headers: adminHeaders(accessKey, {
         "Content-Type": "application/json"
-      },
+      }),
       body: JSON.stringify({
         email,
         amount,
@@ -241,13 +321,17 @@ balanceForm?.addEventListener("submit", async (event) => {
 
     const payload = await response.json().catch(() => ({ message: "操作失败。" }));
     if (!response.ok) {
-      balanceStatus("error", "添加失败", payload.message || "无法添加余额。");
+      balanceStatus("error", "添加失败", isUnauthorized(response, payload) ? unauthorizedMessage() : (payload.message || "无法添加余额。"));
+      if (!isUnauthorized(response, payload)) {
+        await loadLogs();
+      }
       return;
     }
 
     balanceStatus("success", "添加成功", payload.message || "余额已添加。");
     balanceForm.reset();
     form.requestSubmit();
+    await loadLogs();
   } catch {
     balanceStatus("error", "请求失败", "网络异常或服务不可用，请稍后再试。");
   } finally {
@@ -255,16 +339,30 @@ balanceForm?.addEventListener("submit", async (event) => {
   }
 });
 
+logsRefreshButton?.addEventListener("click", () => {
+  loadLogs();
+});
+
+logoutButton?.addEventListener("click", async () => {
+  logoutButton.disabled = true;
+  try {
+    await fetch("/api/admin/logout", { method: "POST" });
+  } finally {
+    window.location.href = "/admin.html";
+  }
+});
+
+tabButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    activateTab(button.dataset.tabTarget);
+  });
+});
+
 uploadForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
 
   const accessKey = getAccessKey();
   const file = fileInput.files?.[0];
-
-  if (!accessKey) {
-    galleryStatus("error", "访问密钥不能为空", "请先输入访问密钥。");
-    return;
-  }
 
   if (!file) {
     galleryStatus("error", "请选择图片", "请先选择要上传的二维码图片。");
@@ -282,9 +380,7 @@ uploadForm?.addEventListener("submit", async (event) => {
 
     const response = await fetch("/api/gallery/upload", {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessKey}`
-      },
+      headers: adminHeaders(accessKey),
       body: data
     });
 
@@ -315,8 +411,8 @@ galleryAdminGrid?.addEventListener("click", async (event) => {
   const id = card?.dataset.id;
   const accessKey = getAccessKey();
 
-  if (!id || !accessKey) {
-    galleryStatus("error", "缺少访问密钥", "请先输入访问密钥。");
+  if (!id) {
+    galleryStatus("error", "缺少图片 ID", "无法识别需要操作的图片。");
     return;
   }
 
@@ -325,17 +421,14 @@ galleryAdminGrid?.addEventListener("click", async (event) => {
     if (action === "delete") {
       response = await fetch(`/api/gallery/${id}`, {
         method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${accessKey}`
-        }
+        headers: adminHeaders(accessKey)
       });
     } else {
       response = await fetch(`/api/gallery/${id}/move`, {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${accessKey}`,
+        headers: adminHeaders(accessKey, {
           "Content-Type": "application/json"
-        },
+        }),
         body: JSON.stringify({ direction: action })
       });
     }

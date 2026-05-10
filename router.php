@@ -5,8 +5,9 @@ require __DIR__ . '/app.php';
 
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
 $staticFile = APP_BASE_DIR . $path;
+$extension = strtolower(pathinfo($staticFile, PATHINFO_EXTENSION));
 
-if ($path !== '/' && is_file($staticFile)) {
+if ($path !== '/' && is_file($staticFile) && $extension !== 'php') {
     return false;
 }
 

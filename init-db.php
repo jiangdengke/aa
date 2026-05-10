@@ -8,5 +8,5 @@ if (!app_uses_database()) {
     exit(0);
 }
 
-app_database();
+app_database(true);
 echo "Database initialized.\n";

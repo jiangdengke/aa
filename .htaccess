@@ -1,0 +1,10 @@
+RewriteEngine On
+SetEnvIf Authorization "(.+)" HTTP_AUTHORIZATION=$1
+
+# Static assets can be served directly. PHP pages must go through router.php so
+# templates always have app.php loaded.
+RewriteCond %{REQUEST_URI} ^/public/
+RewriteCond %{REQUEST_FILENAME} -f
+RewriteRule ^ - [L]
+
+RewriteRule ^ router.php [L]

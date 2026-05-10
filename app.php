@@ -8,6 +8,7 @@ const APP_LOCK_DIR = APP_DATA_DIR . '/locks';
 const APP_CLAIMS_FILE = APP_DATA_DIR . '/claims.json';
 const APP_GALLERY_FILE = APP_DATA_DIR . '/gallery.json';
 const APP_RATE_LIMITS_FILE = APP_DATA_DIR . '/rate_limits.json';
+const APP_UPSTREAM_TOKEN_FILE = APP_DATA_DIR . '/upstream_token.json';
 const APP_LOG_FILE = APP_DATA_DIR . '/app.log';
 
 final class AppError extends RuntimeException
@@ -80,6 +81,8 @@ function app_config(): array
     $config = [
         'port' => (int) (app_env('PORT', '3000') ?? '3000'),
         'base_url' => rtrim((string) app_env('BASE_URL', 'https://ai.laodog.top'), '/'),
+        'upstream_base_url' => rtrim((string) app_env('UPSTREAM_BASE_URL', ''), '/'),
+        'upstream_host_header' => trim((string) app_env('UPSTREAM_HOST_HEADER', '')),
         'admin_email' => trim((string) app_env('ADMIN_EMAIL', '')),
         'admin_password' => (string) app_env('ADMIN_PASSWORD', ''),
         'records_access_key' => trim((string) app_env('RECORDS_ACCESS_KEY', '')),
@@ -130,8 +133,48 @@ function app_log(string $level, string $message, array $context = []): void
     }
 
     $logFile = app_config()['log_file'] !== '' ? app_config()['log_file'] : APP_LOG_FILE;
+    $logDir = dirname($logFile);
+    if (!is_dir($logDir)) {
+        @mkdir($logDir, 0777, true);
+    }
     @file_put_contents($logFile, $line . PHP_EOL, FILE_APPEND | LOCK_EX);
     error_log($line);
+}
+
+function app_read_logs(int $limit = 200): array
+{
+    $logFile = app_config()['log_file'] !== '' ? app_config()['log_file'] : APP_LOG_FILE;
+    if (!is_file($logFile)) {
+        return [];
+    }
+
+    $lines = file($logFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    if ($lines === false) {
+        throw new AppError(500, 'storage_error', '无法读取日志文件。');
+    }
+
+    $lines = array_slice($lines, -max(1, min($limit, 500)));
+    $items = [];
+    foreach (array_reverse($lines) as $line) {
+        $decoded = json_decode($line, true);
+        if (is_array($decoded)) {
+            $items[] = [
+                'time' => $decoded['time'] ?? null,
+                'level' => $decoded['level'] ?? '',
+                'message' => $decoded['message'] ?? '',
+                'context' => is_array($decoded['context'] ?? null) ? $decoded['context'] : [],
+            ];
+            continue;
+        }
+        $items[] = [
+            'time' => null,
+            'level' => 'INFO',
+            'message' => $line,
+            'context' => [],
+        ];
+    }
+
+    return $items;
 }
 
 function app_uses_database(): bool
@@ -140,12 +183,24 @@ function app_uses_database(): bool
     return $config['db_driver'] === 'mysql' || $config['db_host'] !== '' || $config['db_database'] !== '';
 }
 
-function app_database(): PDO
+function app_database(bool $initialize = false): PDO
 {
     static $pdo = null;
     static $initialized = false;
 
     if ($pdo !== null) {
+        if ($initialize && !$initialized) {
+            app_log('info', 'Initializing database', [
+                'host' => app_config()['db_host'],
+                'port' => app_config()['db_port'],
+                'database' => app_config()['db_database'],
+            ]);
+            app_initialize_database($pdo);
+            $initialized = true;
+            app_log('info', 'Database initialized', [
+                'database' => app_config()['db_database'],
+            ]);
+        }
         return $pdo;
     }
 
@@ -183,7 +238,7 @@ function app_database(): PDO
         throw new AppError(500, 'database_error', '数据库连接失败：' . $error->getMessage());
     }
 
-    if (!$initialized) {
+    if ($initialize && !$initialized) {
         app_log('info', 'Initializing database', [
             'host' => $host,
             'port' => $config['db_port'],
@@ -414,6 +469,9 @@ function app_assert_config(): void
     if ($config['base_url'] === '') {
         throw new AppError(500, 'config_error', 'BASE_URL 未配置。');
     }
+    if (($config['upstream_base_url'] !== '') && !preg_match('#^https?://#i', $config['upstream_base_url'])) {
+        throw new AppError(500, 'config_error', 'UPSTREAM_BASE_URL 必须以 http:// 或 https:// 开头。');
+    }
     if ($config['admin_email'] === '' || $config['admin_password'] === '') {
         throw new AppError(500, 'config_error', 'ADMIN_EMAIL 或 ADMIN_PASSWORD 未配置。');
     }
@@ -540,16 +598,60 @@ function app_normalize_captcha_code(string $value): string
     return strtoupper(trim($value));
 }
 
+function app_admin_is_authenticated(): bool
+{
+    return ($_SESSION['admin_authenticated'] ?? false) === true;
+}
+
+function app_admin_authenticate(string $accessKey): void
+{
+    app_assert_records_access_configured();
+    if (!hash_equals(app_config()['records_access_key'], trim($accessKey))) {
+        throw new AppError(401, 'unauthorized', '访问密钥错误。');
+    }
+
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        session_regenerate_id(true);
+    }
+    $_SESSION['admin_authenticated'] = true;
+    $_SESSION['admin_authenticated_at'] = time();
+}
+
+function app_admin_logout(): void
+{
+    unset($_SESSION['admin_authenticated'], $_SESSION['admin_authenticated_at']);
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        session_regenerate_id(true);
+    }
+}
+
 function app_require_records_access(): void
 {
     app_assert_records_access_configured();
-    $header = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
-    if (!preg_match('/^Bearer\s+(.+)$/i', (string) $header, $matches)) {
-        throw new AppError(401, 'unauthorized', '无权查看领取记录。');
+    if (app_admin_is_authenticated()) {
+        return;
     }
-    $token = trim($matches[1]);
+
+    $requestHeaders = function_exists('apache_request_headers') ? apache_request_headers() : [];
+    $token = trim((string) (
+        $_SERVER['HTTP_X_ACCESS_KEY']
+        ?? $requestHeaders['X-Access-Key']
+        ?? ''
+    ));
+
+    if ($token === '') {
+        $header = $_SERVER['HTTP_AUTHORIZATION']
+            ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION']
+            ?? $requestHeaders['Authorization']
+            ?? '';
+        if (!preg_match('/^Bearer\s+(.+)$/i', (string) $header, $matches)) {
+            throw new AppError(401, 'unauthorized', '访问密钥错误或未填写。');
+        }
+        $token = trim($matches[1]);
+    }
+
     if ($token === '' || $token !== app_config()['records_access_key']) {
-        throw new AppError(401, 'unauthorized', '无权查看领取记录。');
+        throw new AppError(401, 'unauthorized', '访问密钥错误或未填写。');
     }
 }
 
@@ -795,24 +897,113 @@ function app_verify_captcha(string $token, string $code, string $ip): void
 
 function app_http_request(string $method, string $url, array $headers = [], ?string $body = null): array
 {
+    $method = strtoupper($method);
+    $hasConnectionHeader = false;
+    $hasUserAgentHeader = false;
     $headerLines = [];
     foreach ($headers as $name => $value) {
+        if (strcasecmp($name, 'Connection') === 0) {
+            $hasConnectionHeader = true;
+        }
+        if (strcasecmp($name, 'User-Agent') === 0) {
+            $hasUserAgentHeader = true;
+        }
         $headerLines[] = $name . ': ' . $value;
+    }
+    if (!$hasConnectionHeader) {
+        $headerLines[] = 'Connection: close';
+    }
+    if (!$hasUserAgentHeader) {
+        $headerLines[] = 'User-Agent: laodog-bonus-claim/1.0';
+    }
+
+    if (function_exists('curl_init')) {
+        $lastError = '';
+        $parts = parse_url($url);
+        for ($attempt = 1; $attempt <= 2; $attempt++) {
+            $ch = curl_init($url);
+            if ($ch === false) {
+                break;
+            }
+
+            $options = [
+                CURLOPT_CUSTOMREQUEST => $method,
+                CURLOPT_HTTPHEADER => $headerLines,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_HEADER => true,
+                CURLOPT_TIMEOUT => 20,
+                CURLOPT_CONNECTTIMEOUT => 8,
+                CURLOPT_FOLLOWLOCATION => false,
+                CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+            ];
+            if ($body !== null) {
+                $options[CURLOPT_POSTFIELDS] = $body;
+            }
+            curl_setopt_array($ch, $options);
+            $raw = curl_exec($ch);
+            $errno = curl_errno($ch);
+            $error = curl_error($ch);
+            $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $headerSize = (int) curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+            curl_close($ch);
+
+            if ($raw !== false && $status > 0) {
+                $raw = (string) $raw;
+                $headerBlock = substr($raw, 0, $headerSize);
+                $responseBody = substr($raw, $headerSize);
+                $responseHeaders = array_values(array_filter(
+                    preg_split('/\r\n|\n|\r/', trim($headerBlock)) ?: [],
+                    static fn ($line) => $line !== ''
+                ));
+                return [
+                    'status' => $status,
+                    'body' => $responseBody,
+                    'headers' => $responseHeaders,
+                ];
+            }
+
+            $lastError = $error !== '' ? $error : ('curl errno ' . $errno);
+            app_log('warning', 'Upstream curl attempt failed', [
+                'method' => $method,
+                'host' => $parts['host'] ?? '',
+                'path' => $parts['path'] ?? '',
+                'attempt' => $attempt,
+                'error' => $lastError,
+            ]);
+            usleep(200000);
+        }
+
+        app_log('warning', 'Upstream curl failed, falling back to PHP stream', [
+            'method' => $method,
+            'host' => $parts['host'] ?? '',
+            'path' => $parts['path'] ?? '',
+            'error' => $lastError,
+        ]);
     }
 
     $context = stream_context_create([
         'http' => [
-            'method' => strtoupper($method),
+            'method' => $method,
             'header' => implode("\r\n", $headerLines),
             'content' => $body ?? '',
             'ignore_errors' => true,
+            'protocol_version' => 1.1,
             'timeout' => 20,
         ],
     ]);
 
+    error_clear_last();
     $result = @file_get_contents($url, false, $context);
     $responseHeaders = $http_response_header ?? [];
     if ($result === false && $responseHeaders === []) {
+        $error = error_get_last();
+        $parts = parse_url($url);
+        app_log('error', 'Upstream connection failed', [
+            'method' => $method,
+            'host' => $parts['host'] ?? '',
+            'path' => $parts['path'] ?? '',
+            'error' => is_array($error) ? ($error['message'] ?? '') : '',
+        ]);
         throw new AppError(502, 'upstream_error', '无法连接上游服务。');
     }
 
@@ -852,10 +1043,38 @@ function app_unwrap_api_payload($payload)
     return $payload;
 }
 
+function app_load_upstream_token(): ?string
+{
+    $store = app_load_json_file(APP_UPSTREAM_TOKEN_FILE, []);
+    $token = (string) ($store['access_token'] ?? '');
+    $expiresAt = (int) ($store['expires_at'] ?? 0);
+    if ($token === '' || $expiresAt <= time() + 60) {
+        return null;
+    }
+    return $token;
+}
+
+function app_save_upstream_token(string $token, int $expiresIn): void
+{
+    app_save_json_file(APP_UPSTREAM_TOKEN_FILE, [
+        'access_token' => $token,
+        'expires_at' => time() + max(60, $expiresIn),
+        'created_at' => gmdate('c'),
+    ]);
+}
+
+function app_clear_upstream_token(): void
+{
+    if (is_file(APP_UPSTREAM_TOKEN_FILE) && !unlink(APP_UPSTREAM_TOKEN_FILE)) {
+        app_log('warning', 'Unable to clear upstream token cache');
+    }
+}
+
 function app_upstream_json(string $method, string $path, array $query = [], ?array $body = null, ?string $token = null)
 {
     $config = app_config();
-    $url = $config['base_url'] . $path;
+    $baseUrl = $config['upstream_base_url'] !== '' ? $config['upstream_base_url'] : $config['base_url'];
+    $url = $baseUrl . $path;
     if ($query !== []) {
         $url .= '?' . http_build_query(array_filter(
             $query,
@@ -864,6 +1083,9 @@ function app_upstream_json(string $method, string $path, array $query = [], ?arr
     }
 
     $headers = ['Accept' => 'application/json'];
+    if ($config['upstream_host_header'] !== '') {
+        $headers['Host'] = $config['upstream_host_header'];
+    }
     $encodedBody = null;
     if ($body !== null) {
         $headers['Content-Type'] = 'application/json';
@@ -888,13 +1110,33 @@ function app_upstream_json(string $method, string $path, array $query = [], ?arr
         );
     }
 
+    if (is_array($payload) && array_key_exists('code', $payload) && (int) $payload['code'] !== 0) {
+        $upstreamCode = (int) $payload['code'];
+        $status = ($upstreamCode >= 400 && $upstreamCode < 600) ? $upstreamCode : 502;
+        throw new AppError(
+            $status,
+            'upstream_error',
+            app_extract_upstream_message($payload, '上游接口请求失败。'),
+            ['upstreamCode' => $upstreamCode]
+        );
+    }
+
     return $payload;
 }
 
-function app_admin_login_token(): string
+function app_admin_login_token(bool $forceRefresh = false): string
 {
     app_assert_config();
+    if (!$forceRefresh) {
+        $cached = app_load_upstream_token();
+        if ($cached !== null) {
+            app_log('info', 'Using cached upstream token');
+            return $cached;
+        }
+    }
+
     $config = app_config();
+    app_log('info', 'Requesting upstream admin token');
     $payload = app_unwrap_api_payload(app_upstream_json(
         'POST',
         '/api/v1/auth/login',
@@ -908,6 +1150,12 @@ function app_admin_login_token(): string
     if (!is_array($payload) || !isset($payload['access_token']) || !is_string($payload['access_token'])) {
         throw new AppError(502, 'admin_login_failed', '管理员登录失败，请确认账号密码是否正确。');
     }
+
+    app_save_upstream_token(
+        $payload['access_token'],
+        isset($payload['expires_in']) ? (int) $payload['expires_in'] : 3600
+    );
+    app_log('info', 'Upstream admin token cached');
 
     return $payload['access_token'];
 }
@@ -969,6 +1217,34 @@ function app_add_user_balance(string $token, int|string $userId, float $amount, 
         ],
         $token
     );
+}
+
+function app_with_upstream_token(callable $callback)
+{
+    $token = app_admin_login_token();
+    try {
+        return $callback($token);
+    } catch (AppError $error) {
+        if ($error->status !== 401) {
+            throw $error;
+        }
+        app_clear_upstream_token();
+        app_log('warning', 'Refreshing upstream token after unauthorized response');
+        $token = app_admin_login_token(true);
+        return $callback($token);
+    }
+}
+
+function app_find_user_by_email_using_admin(string $email): ?array
+{
+    return app_with_upstream_token(static fn (string $token): ?array => app_find_user_by_email($token, $email));
+}
+
+function app_add_user_balance_using_admin(int|string $userId, float $amount, string $notes): void
+{
+    app_with_upstream_token(static function (string $token) use ($userId, $amount, $notes): void {
+        app_add_user_balance($token, $userId, $amount, $notes);
+    });
 }
 
 function app_load_claims_store(): array
@@ -1107,8 +1383,7 @@ function app_process_claim_db(string $email, string $remoteIp): array
             throw new AppError(409, 'claim_pending', '该邮箱的领取请求正在处理中，请稍后再试。');
         }
 
-        $token = app_admin_login_token();
-        $user = app_find_user_by_email($token, $email);
+        $user = app_find_user_by_email_using_admin($email);
         if ($user === null) {
             throw new AppError(404, 'user_not_found', '无该账户。');
         }
@@ -1155,7 +1430,7 @@ function app_process_claim_db(string $email, string $remoteIp): array
 
         try {
             $notes = app_config()['claim_notes'] . ' [claim:' . $record['id'] . ']';
-            app_add_user_balance($token, $userId, (float) app_config()['claim_amount'], $notes);
+            app_add_user_balance_using_admin($userId, (float) app_config()['claim_amount'], $notes);
             $record = app_db_update_claim_status($pdo, $record['id'], 'completed', gmdate('c'), null, null);
             app_log('info', 'Auto claim completed', [
                 'id' => $record['id'],
@@ -1217,8 +1492,7 @@ function app_process_claim(string $email, string $remoteIp): array
             throw new AppError(409, 'claim_pending', '该邮箱的领取请求正在处理中，请稍后再试。');
         }
 
-        $token = app_admin_login_token();
-        $user = app_find_user_by_email($token, $email);
+        $user = app_find_user_by_email_using_admin($email);
         if ($user === null) {
             throw new AppError(404, 'user_not_found', '无该账户。');
         }
@@ -1259,7 +1533,7 @@ function app_process_claim(string $email, string $remoteIp): array
 
         try {
             $notes = app_config()['claim_notes'] . ' [claim:' . $record['id'] . ']';
-            app_add_user_balance($token, $userId, (float) app_config()['claim_amount'], $notes);
+            app_add_user_balance_using_admin($userId, (float) app_config()['claim_amount'], $notes);
             foreach ($store['claims'] as &$claim) {
                 if (($claim['id'] ?? '') === $record['id']) {
                     $claim['status'] = 'completed';
@@ -1313,8 +1587,7 @@ function app_process_claim(string $email, string $remoteIp): array
 function app_process_manual_balance_db(string $email, float $amount, string $notes, string $remoteIp): array
 {
     $pdo = app_database();
-    $token = app_admin_login_token();
-    $user = app_find_user_by_email($token, $email);
+    $user = app_find_user_by_email_using_admin($email);
     if ($user === null) {
         throw new AppError(404, 'user_not_found', '无该账户。');
     }
@@ -1350,7 +1623,7 @@ function app_process_manual_balance_db(string $email, float $amount, string $not
     ]);
 
     try {
-        app_add_user_balance($token, $userId, $amount, $recordNotes . ' [manual:' . $record['id'] . ']');
+        app_add_user_balance_using_admin($userId, $amount, $recordNotes . ' [manual:' . $record['id'] . ']');
         $record = app_db_update_claim_status($pdo, $record['id'], 'completed', gmdate('c'), null, null);
         app_log('info', 'Manual balance completed', [
             'id' => $record['id'],
@@ -1397,8 +1670,7 @@ function app_process_manual_balance(string $email, float $amount, string $notes,
     return app_with_lock('claims', function () use ($email, $amount, $notes, $remoteIp): array {
         $store = app_load_claims_store();
 
-        $token = app_admin_login_token();
-        $user = app_find_user_by_email($token, $email);
+        $user = app_find_user_by_email_using_admin($email);
         if ($user === null) {
             throw new AppError(404, 'user_not_found', '无该账户。');
         }
@@ -1435,7 +1707,7 @@ function app_process_manual_balance(string $email, float $amount, string $notes,
         ]);
 
         try {
-            app_add_user_balance($token, $userId, $amount, $recordNotes . ' [manual:' . $record['id'] . ']');
+            app_add_user_balance_using_admin($userId, $amount, $recordNotes . ' [manual:' . $record['id'] . ']');
             foreach ($store['claims'] as &$claim) {
                 if (($claim['id'] ?? '') === $record['id']) {
                     $claim['status'] = 'completed';
@@ -1926,8 +2198,8 @@ function app_dispatch(string $method, string $path): never
             app_page_response('index.php');
         }
 
-        if ($method === 'GET' && ($path === '/admin.html' || $path === '/admin.php')) {
-            app_page_response('admin.php');
+        if ($method === 'GET' && ($path === '/admin.html' || $path === '/admin.php' || $path === '/admin-login.html' || $path === '/admin-login.php')) {
+            app_page_response(app_admin_is_authenticated() ? 'admin.php' : 'admin-login.php');
         }
 
         if ($method === 'GET' && $path === '/api/health') {
@@ -1946,6 +2218,24 @@ function app_dispatch(string $method, string $path): never
                 'title' => 'dogcoding 额度领取',
                 'captchaRequired' => true,
             ]);
+        }
+
+        if ($method === 'GET' && $path === '/api/admin/session') {
+            app_json_response(200, ['authenticated' => app_admin_is_authenticated()]);
+        }
+
+        if ($method === 'POST' && $path === '/api/admin/login') {
+            $body = app_read_json_body();
+            app_admin_authenticate((string) ($body['accessKey'] ?? ''));
+            app_log('info', 'Admin session created', [
+                'remoteIp' => $ip,
+            ]);
+            app_json_response(200, ['ok' => true]);
+        }
+
+        if ($method === 'POST' && $path === '/api/admin/logout') {
+            app_admin_logout();
+            app_json_response(200, ['ok' => true]);
         }
 
         if ($method === 'GET' && $path === '/api/gallery') {
@@ -1985,6 +2275,13 @@ function app_dispatch(string $method, string $path): never
                 'sortBy' => $_GET['sortBy'] ?? 'awardedAt',
                 'sortOrder' => $_GET['sortOrder'] ?? 'desc',
             ]);
+            app_json_response(200, ['items' => $items, 'total' => count($items)]);
+        }
+
+        if ($method === 'GET' && $path === '/api/admin/logs') {
+            app_require_records_access();
+            $limit = (int) ($_GET['limit'] ?? 200);
+            $items = app_read_logs($limit);
             app_json_response(200, ['items' => $items, 'total' => count($items)]);
         }
 
@@ -2042,12 +2339,23 @@ function app_dispatch(string $method, string $path): never
 
         app_not_found();
     } catch (AppError $error) {
+        app_log('warning', 'Request failed', [
+            'method' => $method,
+            'path' => $path,
+            'status' => $error->status,
+            'errorCode' => $error->errorCode,
+            'message' => $error->getMessage(),
+        ]);
         app_json_response($error->status, [
             'error' => $error->errorCode,
             'message' => $error->getMessage(),
         ]);
     } catch (Throwable $error) {
-        error_log((string) $error);
+        app_log('error', 'Request crashed', [
+            'method' => $method,
+            'path' => $path,
+            'error' => $error->getMessage(),
+        ]);
         app_json_response(500, [
             'error' => 'internal_error',
             'message' => '服务异常，请稍后再试。',

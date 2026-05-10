@@ -27,6 +27,8 @@
 先准备环境变量：
 
 - `BASE_URL`: 你的站点地址，默认 `https://ai.laodog.top`
+- `UPSTREAM_BASE_URL`: 可选，后端调用上游接口的内部地址；为空时使用 `BASE_URL`
+- `UPSTREAM_HOST_HEADER`: 可选，当 `UPSTREAM_BASE_URL` 配成 IP 或内网域名时，用它指定上游需要的 `Host`
 - `ADMIN_EMAIL`: 管理员邮箱
 - `ADMIN_PASSWORD`: 管理员密码
 - `RECORDS_ACCESS_KEY`: 查看领取记录的访问密钥
@@ -37,7 +39,7 @@
 - `DB_USERNAME`: MySQL 用户名
 - `DB_PASSWORD`: MySQL 密码
 - `DB_CHARSET`: MySQL 字符集，默认 `utf8mb4`
-- `LOG_FILE`: 应用日志文件，默认 `/app/data/app.log`
+- `LOG_FILE`: 应用日志文件，默认 `/var/www/html/data/app.log`
 - `CLAIM_AMOUNT`: 赠送额度，默认 `10`
 - `CLAIM_NOTES`: 写入后台余额记录的备注
 - `RATE_LIMIT_MAX`: 单个 IP 10 分钟内最大请求次数，默认 `20`
@@ -73,6 +75,8 @@ http://127.0.0.1:3000/admin.php
 http://127.0.0.1:3000/admin.php
 ```
 
+管理后台会先显示密钥验证页，输入 `.env` 里的 `RECORDS_ACCESS_KEY` 后才会进入后台。登录状态保存在服务端 PHP session，后台右上角可退出登录。
+
 ## Docker Compose 启动
 
 推荐直接用 Compose：
@@ -102,9 +106,11 @@ docker compose up -d --build
 Compose 配置文件在 [docker-compose.yml](/home/jdk/code/aa/docker-compose.yml)，默认会：
 
 - 读取当前目录的 `.env`
-- 把本地 `./data` 挂载到容器内 `/app/data`
-- 暴露端口 `3000`
+- 把本地 `./data` 挂载到容器内 `/var/www/html/data`
+- 使用宿主机网络并监听 `3000`
 - 使用 `unless-stopped` 自动重启策略
+
+当前 Compose 使用 `network_mode: host`，这是为了避免 Docker bridge 网络下访问 `https://ai.laodog.top` 出现 TLS 超时。该配置适用于 Linux；如果部署在 Docker Desktop，需要改回端口映射模式。
 
 ## 数据持久化
 
@@ -115,7 +121,7 @@ Compose 配置文件在 [docker-compose.yml](/home/jdk/code/aa/docker-compose.ym
 - `data/gallery/`: 二维码图片文件
 - `data/rate_limits.json`: 限流数据
 
-如果 `.env` 配置了 MySQL，领取记录、二维码元数据和限流数据会写入数据库。二维码图片文件仍保存在 `data/gallery/`，所以 Compose 里的 `./data:/app/data` 仍然需要保留。
+如果 `.env` 配置了 MySQL，领取记录、二维码元数据和限流数据会写入数据库。二维码图片文件仍保存在 `data/gallery/`，所以 Compose 里的 `./data:/var/www/html/data` 仍然需要保留。
 
 MySQL 示例：
 
@@ -127,8 +133,18 @@ DB_DATABASE=laodog_bonus
 DB_USERNAME=laodog_bonus
 DB_PASSWORD=replace-me
 DB_CHARSET=utf8mb4
-LOG_FILE=/app/data/app.log
+LOG_FILE=/var/www/html/data/app.log
 ```
+
+如果后台“添加余额”返回 `无法连接上游服务`，说明本应用容器无法稳定访问 `BASE_URL` 的上游 API。部署在同一台服务器时，建议让它走内网或宿主机地址，例如：
+
+```env
+BASE_URL=https://ai.laodog.top
+UPSTREAM_BASE_URL=http://host.docker.internal:你的上游端口
+UPSTREAM_HOST_HEADER=ai.laodog.top
+```
+
+如果你的上游服务就在另一个 Compose 服务里，也可以把 `UPSTREAM_BASE_URL` 配成服务名，例如 `http://open-webui:8080`。关键是这个地址必须能从 `laodog-bonus-claim` 容器内部访问。
 
 首次启用数据库时，如果数据库表为空，应用会自动把现有 `data/claims.json` 和 `data/gallery.json` 导入数据库。
 
@@ -143,10 +159,10 @@ docker compose exec laodog-bonus-claim php init-db.php
 应用日志会写入 `LOG_FILE`，默认是：
 
 ```text
-/app/data/app.log
+/var/www/html/data/app.log
 ```
 
-因为 Compose 挂载了 `./data:/app/data`，所以宿主机上可以直接查看：
+因为 Compose 挂载了 `./data:/var/www/html/data`，所以宿主机上可以直接查看：
 
 ```bash
 tail -f data/app.log
@@ -177,6 +193,7 @@ docker compose logs -f
 - `GET /api/captcha`
 - `POST /api/claim`
 - `GET /api/admin/claims`
+- `GET /api/admin/logs`
 - `POST /api/admin/balance`
 - `GET /api/gallery`
 - `POST /api/gallery/upload`
@@ -187,6 +204,7 @@ docker compose logs -f
 ## 已做保护
 
 - 管理员邮箱和密码只保存在服务端环境变量里，不会发到前端
+- 管理后台访问前必须先输入 `RECORDS_ACCESS_KEY`，验证通过后才会进入后台页面
 - 同一邮箱和同一用户 ID 都会拦截重复领取
 - 使用本地 `claims.json` 做持久化
 - 配置 MySQL 后会使用数据库持久化，自动领取查重有数据库唯一键兜底
@@ -196,6 +214,7 @@ docker compose logs -f
 - 验证码带有效期、尝试次数限制和刷新频率限制
 - 已接入领取记录查询接口，必须提供 `RECORDS_ACCESS_KEY` 才能读取
 - 管理后台可按邮箱给用户手动添加自定义余额，操作记录会写入 `data/claims.json`
+- 管理后台可查看最近操作日志，用于确认给谁添加了余额
 - 已接入二维码图片上传接口，使用同一个 `RECORDS_ACCESS_KEY` 管理
 - 管理后台已支持查看记录、上传二维码、删除二维码、调整图片顺序
 
