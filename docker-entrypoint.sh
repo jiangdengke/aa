@@ -2,7 +2,7 @@
 set -eu
 
 : "${PORT:=3000}"
-: "${BIND_ADDRESS:=127.0.0.1}"
+: "${BIND_ADDRESS:=0.0.0.0}"
 
 echo 'ServerName localhost' >/etc/apache2/conf-available/servername.conf
 a2enconf servername

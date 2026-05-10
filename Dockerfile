@@ -11,7 +11,7 @@ RUN mkdir -p /var/www/html/data/gallery /var/www/html/data/locks \
     && chown -R www-data:www-data /var/www/html/data
 
 ENV PORT=3000
-ENV BIND_ADDRESS=127.0.0.1
+ENV BIND_ADDRESS=0.0.0.0
 
 EXPOSE 3000
 
