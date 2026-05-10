@@ -108,17 +108,17 @@ Compose 配置文件在 [docker-compose.yml](/home/jdk/code/aa/docker-compose.ym
 
 - 读取当前目录的 `.env`
 - 把本地 `./data` 挂载到容器内 `/var/www/html/data`
-- 把宿主机 `127.0.0.1:3000` 映射到容器 `3000`，`docker ps` 会显示端口
+- 把宿主机 `0.0.0.0:3000` 映射到容器 `3000`，`docker ps` 会显示端口
 - 使用 `unless-stopped` 自动重启策略
 
 当前 Compose 使用端口映射模式，并只绑定宿主机本机地址：
 
 ```yaml
 ports:
-  - "127.0.0.1:${PORT:-3000}:${PORT:-3000}"
+  - "0.0.0.0:${PORT:-3000}:${PORT:-3000}"
 ```
 
-这样 `docker ps` 会显示 `127.0.0.1:3000->3000/tcp`，公网不会直接访问 Docker 端口，Nginx 可以这样反代：
+这样 `docker ps` 会显示 `0.0.0.0:3000->3000/tcp`，Nginx 可以这样反代：
 
 ```nginx
 location / {
