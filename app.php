@@ -8,6 +8,7 @@ const APP_LOCK_DIR = APP_DATA_DIR . '/locks';
 const APP_CLAIMS_FILE = APP_DATA_DIR . '/claims.json';
 const APP_GALLERY_FILE = APP_DATA_DIR . '/gallery.json';
 const APP_RATE_LIMITS_FILE = APP_DATA_DIR . '/rate_limits.json';
+const APP_LOG_FILE = APP_DATA_DIR . '/app.log';
 
 final class AppError extends RuntimeException
 {
@@ -89,6 +90,7 @@ function app_config(): array
         'db_username' => trim((string) app_env('DB_USERNAME', '')),
         'db_password' => (string) app_env('DB_PASSWORD', ''),
         'db_charset' => trim((string) app_env('DB_CHARSET', 'utf8mb4')),
+        'log_file' => trim((string) app_env('LOG_FILE', APP_LOG_FILE)),
         'claim_amount' => (float) (app_env('CLAIM_AMOUNT', '10') ?? '10'),
         'claim_notes' => trim((string) app_env('CLAIM_NOTES', 'Self-service bonus claim')),
         'rate_limit_max' => (int) (app_env('RATE_LIMIT_MAX', '20') ?? '20'),
@@ -102,6 +104,34 @@ function app_config(): array
     ];
 
     return $config;
+}
+
+function app_log(string $level, string $message, array $context = []): void
+{
+    app_ensure_data_dirs();
+    $filtered = [];
+    foreach ($context as $key => $value) {
+        if (preg_match('/password|token|secret|key/i', (string) $key)) {
+            $filtered[$key] = '[redacted]';
+            continue;
+        }
+        $filtered[$key] = is_scalar($value) || $value === null ? $value : json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    }
+
+    $payload = [
+        'time' => gmdate('c'),
+        'level' => strtoupper($level),
+        'message' => $message,
+        'context' => $filtered,
+    ];
+    $line = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if ($line === false) {
+        $line = gmdate('c') . ' ' . strtoupper($level) . ' ' . $message;
+    }
+
+    $logFile = app_config()['log_file'] !== '' ? app_config()['log_file'] : APP_LOG_FILE;
+    @file_put_contents($logFile, $line . PHP_EOL, FILE_APPEND | LOCK_EX);
+    error_log($line);
 }
 
 function app_uses_database(): bool
@@ -144,12 +174,26 @@ function app_database(): PDO
             PDO::ATTR_EMULATE_PREPARES => false,
         ]);
     } catch (PDOException $error) {
+        app_log('error', 'Database connection failed', [
+            'host' => $host,
+            'port' => $config['db_port'],
+            'database' => $config['db_database'],
+            'error' => $error->getMessage(),
+        ]);
         throw new AppError(500, 'database_error', '数据库连接失败：' . $error->getMessage());
     }
 
     if (!$initialized) {
+        app_log('info', 'Initializing database', [
+            'host' => $host,
+            'port' => $config['db_port'],
+            'database' => $config['db_database'],
+        ]);
         app_initialize_database($pdo);
         $initialized = true;
+        app_log('info', 'Database initialized', [
+            'database' => $config['db_database'],
+        ]);
     }
 
     return $pdo;
@@ -157,6 +201,7 @@ function app_database(): PDO
 
 function app_initialize_database(PDO $pdo): void
 {
+    app_log('info', 'Ensuring database tables');
     $pdo->exec(
         "CREATE TABLE IF NOT EXISTS claims (
             id VARCHAR(64) PRIMARY KEY,
@@ -245,7 +290,11 @@ function app_ensure_database_index(PDO $pdo, string $table, string $indexName, s
         try {
             $pdo->exec(sprintf('ALTER TABLE `%s` ADD %s', $table, $definition));
         } catch (PDOException $error) {
-            error_log('Unable to create database index ' . $indexName . ': ' . $error->getMessage());
+            app_log('warning', 'Unable to create database index', [
+                'table' => $table,
+                'index' => $indexName,
+                'error' => $error->getMessage(),
+            ]);
         }
     }
 }
@@ -306,6 +355,9 @@ function app_import_json_to_database(PDO $pdo): void
                 'error_message' => $claim['errorMessage'] ?? null,
             ]);
         }
+        app_log('info', 'Imported claims from JSON', [
+            'count' => count($claims),
+        ]);
     }
 
     $galleryCount = (int) $pdo->query('SELECT COUNT(*) FROM gallery_images')->fetchColumn();
@@ -330,6 +382,9 @@ function app_import_json_to_database(PDO $pdo): void
                 'created_at' => (string) ($image['createdAt'] ?? gmdate('c')),
             ]);
         }
+        app_log('info', 'Imported gallery images from JSON', [
+            'count' => count($images),
+        ]);
     }
 }
 
@@ -1091,11 +1146,23 @@ function app_process_claim_db(string $email, string $remoteIp): array
             throw $error;
         }
         $pdo->commit();
+        app_log('info', 'Auto claim record created', [
+            'id' => $record['id'],
+            'email' => $record['normalizedEmail'],
+            'userId' => $record['userId'],
+            'amount' => $record['amount'],
+        ]);
 
         try {
             $notes = app_config()['claim_notes'] . ' [claim:' . $record['id'] . ']';
             app_add_user_balance($token, $userId, (float) app_config()['claim_amount'], $notes);
             $record = app_db_update_claim_status($pdo, $record['id'], 'completed', gmdate('c'), null, null);
+            app_log('info', 'Auto claim completed', [
+                'id' => $record['id'],
+                'email' => $record['normalizedEmail'],
+                'userId' => $record['userId'],
+                'amount' => $record['amount'],
+            ]);
             return [
                 'user' => [
                     'id' => $user['id'],
@@ -1113,6 +1180,12 @@ function app_process_claim_db(string $email, string $remoteIp): array
                 gmdate('c'),
                 $error instanceof AppError ? $error->getMessage() : '未知错误'
             );
+            app_log('error', 'Auto claim failed', [
+                'id' => $record['id'],
+                'email' => $record['normalizedEmail'],
+                'userId' => $record['userId'],
+                'error' => $error->getMessage(),
+            ]);
             throw $error;
         }
     } catch (Throwable $error) {
@@ -1177,6 +1250,12 @@ function app_process_claim(string $email, string $remoteIp): array
 
         $store['claims'][] = $record;
         app_save_claims_store($store);
+        app_log('info', 'Auto claim record created', [
+            'id' => $record['id'],
+            'email' => $record['normalizedEmail'],
+            'userId' => $record['userId'],
+            'amount' => $record['amount'],
+        ]);
 
         try {
             $notes = app_config()['claim_notes'] . ' [claim:' . $record['id'] . ']';
@@ -1191,6 +1270,12 @@ function app_process_claim(string $email, string $remoteIp): array
             }
             unset($claim);
             app_save_claims_store($store);
+            app_log('info', 'Auto claim completed', [
+                'id' => $record['id'],
+                'email' => $record['normalizedEmail'],
+                'userId' => $record['userId'],
+                'amount' => $record['amount'],
+            ]);
 
             return [
                 'user' => [
@@ -1211,6 +1296,12 @@ function app_process_claim(string $email, string $remoteIp): array
             }
             unset($claim);
             app_save_claims_store($store);
+            app_log('error', 'Auto claim failed', [
+                'id' => $record['id'],
+                'email' => $record['normalizedEmail'],
+                'userId' => $record['userId'],
+                'error' => $error->getMessage(),
+            ]);
             if ($error instanceof AppError) {
                 throw $error;
             }
@@ -1251,10 +1342,22 @@ function app_process_manual_balance_db(string $email, float $amount, string $not
     ];
 
     app_db_insert_claim($pdo, $record);
+    app_log('info', 'Manual balance record created', [
+        'id' => $record['id'],
+        'email' => $record['normalizedEmail'],
+        'userId' => $record['userId'],
+        'amount' => $record['amount'],
+    ]);
 
     try {
         app_add_user_balance($token, $userId, $amount, $recordNotes . ' [manual:' . $record['id'] . ']');
         $record = app_db_update_claim_status($pdo, $record['id'], 'completed', gmdate('c'), null, null);
+        app_log('info', 'Manual balance completed', [
+            'id' => $record['id'],
+            'email' => $record['normalizedEmail'],
+            'userId' => $record['userId'],
+            'amount' => $record['amount'],
+        ]);
         return [
             'record' => $record,
             'user' => [
@@ -1272,6 +1375,12 @@ function app_process_manual_balance_db(string $email, float $amount, string $not
             gmdate('c'),
             $error instanceof AppError ? $error->getMessage() : '未知错误'
         );
+        app_log('error', 'Manual balance failed', [
+            'id' => $record['id'],
+            'email' => $record['normalizedEmail'],
+            'userId' => $record['userId'],
+            'error' => $error->getMessage(),
+        ]);
         if ($error instanceof AppError) {
             throw $error;
         }
@@ -1318,6 +1427,12 @@ function app_process_manual_balance(string $email, float $amount, string $notes,
 
         $store['claims'][] = $record;
         app_save_claims_store($store);
+        app_log('info', 'Manual balance record created', [
+            'id' => $record['id'],
+            'email' => $record['normalizedEmail'],
+            'userId' => $record['userId'],
+            'amount' => $record['amount'],
+        ]);
 
         try {
             app_add_user_balance($token, $userId, $amount, $recordNotes . ' [manual:' . $record['id'] . ']');
@@ -1331,6 +1446,12 @@ function app_process_manual_balance(string $email, float $amount, string $notes,
             }
             unset($claim);
             app_save_claims_store($store);
+            app_log('info', 'Manual balance completed', [
+                'id' => $record['id'],
+                'email' => $record['normalizedEmail'],
+                'userId' => $record['userId'],
+                'amount' => $record['amount'],
+            ]);
 
             return [
                 'record' => $record,
@@ -1351,6 +1472,12 @@ function app_process_manual_balance(string $email, float $amount, string $notes,
             }
             unset($claim);
             app_save_claims_store($store);
+            app_log('error', 'Manual balance failed', [
+                'id' => $record['id'],
+                'email' => $record['normalizedEmail'],
+                'userId' => $record['userId'],
+                'error' => $error->getMessage(),
+            ]);
             if ($error instanceof AppError) {
                 throw $error;
             }
@@ -1593,6 +1720,11 @@ function app_store_gallery_image(array $file, array $fields): array
                     @unlink($removedFile);
                 }
             }
+            app_log('info', 'Gallery image uploaded', [
+                'id' => $record['id'],
+                'title' => $record['title'],
+                'removed' => count($removedIds),
+            ]);
         } catch (Throwable $error) {
             if ($pdo->inTransaction()) {
                 $pdo->rollBack();
@@ -1600,6 +1732,11 @@ function app_store_gallery_image(array $file, array $fields): array
             if (is_file($target)) {
                 @unlink($target);
             }
+            app_log('error', 'Gallery image upload failed', [
+                'id' => $record['id'],
+                'title' => $record['title'],
+                'error' => $error->getMessage(),
+            ]);
             throw $error;
         }
 
@@ -1620,6 +1757,10 @@ function app_store_gallery_image(array $file, array $fields): array
         $store['images'] = $images;
         app_save_gallery_store($store);
     });
+    app_log('info', 'Gallery image uploaded', [
+        'id' => $record['id'],
+        'title' => $record['title'],
+    ]);
 
     return [
         'id' => $record['id'],
@@ -1646,6 +1787,9 @@ function app_delete_gallery_image(string $id): void
         if (is_file($file)) {
             @unlink($file);
         }
+        app_log('info', 'Gallery image deleted', [
+            'id' => $id,
+        ]);
         return;
     }
 
@@ -1671,6 +1815,9 @@ function app_delete_gallery_image(string $id): void
             @unlink($file);
         }
     });
+    app_log('info', 'Gallery image deleted', [
+        'id' => $id,
+    ]);
 }
 
 function app_move_gallery_image(string $id, string $direction): void
@@ -1698,6 +1845,10 @@ function app_move_gallery_image(string $id, string $direction): void
                 ]);
             }
             $pdo->commit();
+            app_log('info', 'Gallery image moved', [
+                'id' => $id,
+                'direction' => $direction,
+            ]);
         } catch (Throwable $error) {
             if ($pdo->inTransaction()) {
                 $pdo->rollBack();
@@ -1732,6 +1883,10 @@ function app_move_gallery_image(string $id, string $direction): void
         $store['images'] = array_values($images);
         app_save_gallery_store($store);
     });
+    app_log('info', 'Gallery image moved', [
+        'id' => $id,
+        'direction' => $direction,
+    ]);
 }
 
 function app_serve_media(string $id, string $method = 'GET'): never

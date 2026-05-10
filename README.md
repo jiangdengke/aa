@@ -37,6 +37,7 @@
 - `DB_USERNAME`: MySQL 用户名
 - `DB_PASSWORD`: MySQL 密码
 - `DB_CHARSET`: MySQL 字符集，默认 `utf8mb4`
+- `LOG_FILE`: 应用日志文件，默认 `/app/data/app.log`
 - `CLAIM_AMOUNT`: 赠送额度，默认 `10`
 - `CLAIM_NOTES`: 写入后台余额记录的备注
 - `RATE_LIMIT_MAX`: 单个 IP 10 分钟内最大请求次数，默认 `20`
@@ -120,15 +121,42 @@ MySQL 示例：
 
 ```env
 DB_DRIVER=mysql
-DB_HOST=127.0.0.1
+DB_HOST=mysql
 DB_PORT=3306
 DB_DATABASE=laodog_bonus
 DB_USERNAME=laodog_bonus
 DB_PASSWORD=replace-me
 DB_CHARSET=utf8mb4
+LOG_FILE=/app/data/app.log
 ```
 
 首次启用数据库时，如果数据库表为空，应用会自动把现有 `data/claims.json` 和 `data/gallery.json` 导入数据库。
+
+容器启动时会自动执行一次数据库初始化。也可以手动执行：
+
+```bash
+docker compose exec laodog-bonus-claim php init-db.php
+```
+
+## 日志
+
+应用日志会写入 `LOG_FILE`，默认是：
+
+```text
+/app/data/app.log
+```
+
+因为 Compose 挂载了 `./data:/app/data`，所以宿主机上可以直接查看：
+
+```bash
+tail -f data/app.log
+```
+
+同一份日志也会写到标准错误，可以通过 Docker 查看：
+
+```bash
+docker compose logs -f
+```
 
 ## 接口逻辑
 

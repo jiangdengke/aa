@@ -1,5 +1,6 @@
 .env
 data/*.json
+data/*.log
 !data/.gitkeep
 data/gallery/
 data/locks/

@@ -12,4 +12,4 @@ ENV PORT=3000
 
 EXPOSE 3000
 
-CMD ["php", "-S", "0.0.0.0:3000", "router.php"]
+CMD ["sh", "-lc", "php init-db.php && php -S 0.0.0.0:3000 router.php"]
