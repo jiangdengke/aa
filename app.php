@@ -1342,6 +1342,16 @@ function app_db_update_claim_status(PDO $pdo, string $id, string $status, ?strin
 
 function app_db_find_active_auto_claim(PDO $pdo, string $field, string $value): ?array
 {
+    return app_db_find_active_claim_by_type($pdo, 'auto_claim', $field, $value);
+}
+
+function app_db_find_active_manual_balance(PDO $pdo, string $field, string $value): ?array
+{
+    return app_db_find_active_claim_by_type($pdo, 'manual_balance', $field, $value);
+}
+
+function app_db_find_active_claim_by_type(PDO $pdo, string $type, string $field, string $value): ?array
+{
     $column = match ($field) {
         'normalizedEmail' => 'normalized_email',
         'userId' => 'user_id',
@@ -1349,20 +1359,27 @@ function app_db_find_active_auto_claim(PDO $pdo, string $field, string $value): 
     };
     $stmt = $pdo->prepare(
         "SELECT * FROM claims
-         WHERE type = 'auto_claim' AND status <> 'failed' AND {$column} = :value
+         WHERE type = :type AND status <> 'failed' AND {$column} = :value
          ORDER BY created_at DESC
          LIMIT 1"
     );
-    $stmt->execute(['value' => $value]);
+    $stmt->execute([
+        'type' => $type,
+        'value' => $value,
+    ]);
     $row = $stmt->fetch();
     return is_array($row) ? app_db_claim_from_row($row) : null;
 }
 
 function app_find_active_claim(array $claims, callable $predicate): ?array
 {
+    return app_find_active_claim_by_type($claims, 'auto_claim', $predicate);
+}
+
+function app_find_active_claim_by_type(array $claims, string $type, callable $predicate): ?array
+{
     foreach ($claims as $claim) {
-        $type = (string) ($claim['type'] ?? 'auto_claim');
-        if ($type === 'auto_claim' && ($claim['status'] ?? '') !== 'failed' && $predicate($claim)) {
+        if ((string) ($claim['type'] ?? '') === $type && ($claim['status'] ?? '') !== 'failed' && $predicate($claim)) {
             return $claim;
         }
     }
@@ -1597,6 +1614,22 @@ function app_process_manual_balance_db(string $email, float $amount, string $not
         throw new AppError(502, 'unexpected_users_response', '用户信息缺少 ID。');
     }
 
+    $existingByEmail = app_db_find_active_manual_balance($pdo, 'normalizedEmail', $email);
+    if (($existingByEmail['status'] ?? '') === 'completed') {
+        throw new AppError(409, 'already_claimed', '该邮箱已经加过余额。');
+    }
+    if (($existingByEmail['status'] ?? '') === 'pending') {
+        throw new AppError(409, 'claim_pending', '该邮箱的加余额请求正在处理中，请稍后再试。');
+    }
+
+    $existingByUserId = app_db_find_active_manual_balance($pdo, 'userId', $userId);
+    if (($existingByUserId['status'] ?? '') === 'completed') {
+        throw new AppError(409, 'already_claimed', '该账户已经加过余额。');
+    }
+    if (($existingByUserId['status'] ?? '') === 'pending') {
+        throw new AppError(409, 'claim_pending', '该账户的加余额请求正在处理中，请稍后再试。');
+    }
+
     $recordNotes = trim($notes) !== '' ? trim($notes) : '管理员手动加余额';
     $record = [
         'id' => bin2hex(random_bytes(16)),
@@ -1678,6 +1711,22 @@ function app_process_manual_balance(string $email, float $amount, string $notes,
         $userId = (string) ($user['id'] ?? '');
         if ($userId === '') {
             throw new AppError(502, 'unexpected_users_response', '用户信息缺少 ID。');
+        }
+
+        $existingByEmail = app_find_active_claim_by_type($store['claims'] ?? [], 'manual_balance', static fn ($claim) => ($claim['normalizedEmail'] ?? '') === $email);
+        if (($existingByEmail['status'] ?? '') === 'completed') {
+            throw new AppError(409, 'already_claimed', '该邮箱已经加过余额。');
+        }
+        if (($existingByEmail['status'] ?? '') === 'pending') {
+            throw new AppError(409, 'claim_pending', '该邮箱的加余额请求正在处理中，请稍后再试。');
+        }
+
+        $existingByUserId = app_find_active_claim_by_type($store['claims'] ?? [], 'manual_balance', static fn ($claim) => (string) ($claim['userId'] ?? '') === $userId);
+        if (($existingByUserId['status'] ?? '') === 'completed') {
+            throw new AppError(409, 'already_claimed', '该账户已经加过余额。');
+        }
+        if (($existingByUserId['status'] ?? '') === 'pending') {
+            throw new AppError(409, 'claim_pending', '该账户的加余额请求正在处理中，请稍后再试。');
         }
 
         $recordNotes = trim($notes) !== '' ? trim($notes) : '管理员手动加余额';
